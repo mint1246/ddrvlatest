@@ -1,24 +1,23 @@
-FROM golang:latest AS build
+FROM rust:1.89-bookworm AS build
 
 WORKDIR /app
 
-COPY go.* ./
-RUN go mod download
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+COPY internal/http/web/static ./internal/http/web/static
 
-COPY . .
+RUN cargo build --release
 
-RUN make build-docker
+FROM debian:bookworm-slim
 
-FROM scratch
-
-COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY --from=build /app/ddrv /app/ddrv
+COPY --from=build /app/target/release/ddrv /app/ddrv
 
-# EXPOSE FTP PORT
 EXPOSE 2525
-# EXPOSE HTTP PORT
 EXPOSE 2526
 
 ENTRYPOINT ["/app/ddrv"]

@@ -1,36 +1,26 @@
-# Name of the binary to build
 BINARY_NAME=ddrv
 
-# Go source files
-SRC=$(shell find . -name "*.go" -type f)
-
-# Build the binary for the current platform
 build:
-	go build -ldflags="-s -w" -o $(BINARY_NAME) ./cmd/ddrv
-
-build-race:
-	go build -race -ldflags="-s -w" -o $(BINARY_NAME) ./cmd/ddrv
+	cargo build --release
+	cp target/release/$(BINARY_NAME) ./$(BINARY_NAME)
 
 build-debug:
-	go build -tags=debug -o $(BINARY_NAME) ./cmd/ddrv
+	cargo build
+	cp target/debug/$(BINARY_NAME) ./$(BINARY_NAME)
 
-# Build the binary inside docker image
 build-docker:
-	CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o $(BINARY_NAME) ./cmd/ddrv
+	cargo build --release
+	cp target/release/$(BINARY_NAME) ./$(BINARY_NAME)
 
-# Build the Docker image
 build-image:
 	docker build -t ddrv:latest .
 
-# Clean the project
 clean:
-	go clean
+	cargo clean
 	rm -f $(BINARY_NAME)
 
-# Run the tests
 test:
-	go test -v ./...
+	cargo test
 
-# Format the source code
 fmt:
-	gofmt -w $(SRC)
+	cargo fmt
