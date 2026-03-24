@@ -71,7 +71,11 @@ fn parent_of(path: &str) -> &str {
 /// True if `child` is a **direct** child of `parent` (not a deeper descendant).
 fn is_direct_child(parent: &str, child: &str) -> bool {
     // Normalise root to empty string for comparison
-    let norm = if parent == ROOT { "" } else { parent.trim_end_matches('/') };
+    let norm = if parent == ROOT {
+        ""
+    } else {
+        parent.trim_end_matches('/')
+    };
     match child.rfind('/') {
         Some(pos) => {
             let cp = &child[..pos];
@@ -89,7 +93,11 @@ fn stored_to_file(path: &str, sf: &StoredFile) -> File {
         name: sf.name.clone(),
         dir: sf.dir,
         size: sf.size,
-        parent: if path == ROOT { None } else { Some(encode_path(pp)) },
+        parent: if path == ROOT {
+            None
+        } else {
+            Some(encode_path(pp))
+        },
         mtime: sf.mtime,
     }
 }
@@ -141,7 +149,10 @@ impl BoltDbProvider {
         }
         write_txn.commit()?;
 
-        Ok(Self { db: Arc::new(Mutex::new(db)), driver })
+        Ok(Self {
+            db: Arc::new(Mutex::new(db)),
+            driver,
+        })
     }
 }
 
@@ -167,7 +178,8 @@ impl DataProvider for BoltDbProvider {
             let sf = get_stored_file(&table, &path)?;
             let file = stored_to_file(&path, &sf);
             if let Some(exp_parent) = expected_parent {
-                let actual_parent = decode_path(file.parent.as_deref().unwrap_or(&encode_path(ROOT)))?;
+                let actual_parent =
+                    decode_path(file.parent.as_deref().unwrap_or(&encode_path(ROOT)))?;
                 if actual_parent != exp_parent {
                     return Err(DataProviderError::InvalidParent);
                 }
@@ -286,9 +298,7 @@ impl DataProvider for BoltDbProvider {
         .map_err(|e| DataProviderError::Other(e.to_string()))??;
 
         // Step 2: refresh any expired Discord URLs
-        let now = Utc::now().timestamp();
-        let has_expired = nodes.iter().any(|n| n.ex > 0 && now > n.ex);
-        if has_expired {
+        if crate::dataprovider::nodes_need_refresh(&nodes) {
             self.driver
                 .update_nodes(&mut nodes)
                 .await
@@ -347,9 +357,7 @@ impl DataProvider for BoltDbProvider {
                 let table = read_txn.open_table(NODES_TABLE)?;
                 let start = node_range_start(&path);
                 let end = node_range_end(&path);
-                table
-                    .range(start.as_str()..end.as_str())?
-                    .count() as i64
+                table.range(start.as_str()..end.as_str())?.count() as i64
             };
 
             let write_txn = db.begin_write()?;
@@ -358,7 +366,11 @@ impl DataProvider for BoltDbProvider {
                 let mut nodes_table = write_txn.open_table(NODES_TABLE)?;
 
                 for (i, n) in nodes.iter().enumerate() {
-                    let nid = if n.nid > 0 { n.nid } else { existing_count + i as i64 };
+                    let nid = if n.nid > 0 {
+                        n.nid
+                    } else {
+                        existing_count + i as i64
+                    };
                     let key = node_key(&path, nid);
                     let sn = StoredNode {
                         nid,
@@ -476,7 +488,11 @@ impl DataProvider for BoltDbProvider {
             children.sort_by(|a, b| a.name.cmp(&b.name));
 
             let start = offset.max(0) as usize;
-            let limit = if limit <= 0 { children.len() } else { limit as usize };
+            let limit = if limit <= 0 {
+                children.len()
+            } else {
+                limit as usize
+            };
             Ok(children.into_iter().skip(start).take(limit).collect())
         })
         .await
@@ -494,7 +510,12 @@ impl DataProvider for BoltDbProvider {
                 let mut fs_table = write_txn.open_table(FS_TABLE)?;
                 if fs_table.get(path.as_str())?.is_none() {
                     let name = path.rsplit('/').next().unwrap_or(&path).to_owned();
-                    let sf = StoredFile { name, dir: false, size: 0, mtime: Utc::now() };
+                    let sf = StoredFile {
+                        name,
+                        dir: false,
+                        size: 0,
+                        mtime: Utc::now(),
+                    };
                     let data = bincode::serialize(&sf)?;
                     fs_table.insert(path.as_str(), data.as_slice())?;
                 }
@@ -530,8 +551,7 @@ impl DataProvider for BoltDbProvider {
                 let mut fs_table = write_txn.open_table(FS_TABLE)?;
                 for component in &components {
                     if fs_table.get(component.as_str())?.is_none() {
-                        let name =
-                            component.rsplit('/').next().unwrap_or(component).to_owned();
+                        let name = component.rsplit('/').next().unwrap_or(component).to_owned();
                         let sf = StoredFile {
                             name,
                             dir: true,
@@ -624,13 +644,10 @@ impl DataProvider for BoltDbProvider {
                 let read_txn = db.begin_read()?;
                 let table = read_txn.open_table(FS_TABLE)?;
 
-                let guard =
-                    table.get(old_path.as_str())?.ok_or(DataProviderError::NotFound)?;
-                let mut moves = vec![(
-                    old_path.clone(),
-                    new_path.clone(),
-                    guard.value().to_vec(),
-                )];
+                let guard = table
+                    .get(old_path.as_str())?
+                    .ok_or(DataProviderError::NotFound)?;
+                let mut moves = vec![(old_path.clone(), new_path.clone(), guard.value().to_vec())];
 
                 // Collect descendants
                 let descendants = collect_descendants(&table, &old_path)?;
@@ -640,8 +657,9 @@ impl DataProvider for BoltDbProvider {
                     }
                     let suffix = &desc[old_path.len()..]; // starts with '/'
                     let new_desc = format!("{}{}", new_path, suffix);
-                    let guard =
-                        table.get(desc.as_str())?.ok_or(DataProviderError::NotFound)?;
+                    let guard = table
+                        .get(desc.as_str())?
+                        .ok_or(DataProviderError::NotFound)?;
                     moves.push((desc, new_desc, guard.value().to_vec()));
                 }
                 moves
@@ -702,8 +720,9 @@ impl DataProvider for BoltDbProvider {
             let write_txn = db.begin_write()?;
             {
                 let mut fs_table = write_txn.open_table(FS_TABLE)?;
-                let guard =
-                    fs_table.get(path.as_str())?.ok_or(DataProviderError::NotFound)?;
+                let guard = fs_table
+                    .get(path.as_str())?
+                    .ok_or(DataProviderError::NotFound)?;
                 let mut sf: StoredFile = bincode::deserialize(guard.value())?;
                 drop(guard);
                 sf.mtime = time;

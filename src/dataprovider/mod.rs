@@ -1,7 +1,6 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 pub mod boltdb;
 pub mod postgres;
@@ -10,6 +9,17 @@ pub mod types;
 pub use types::{DataProviderError, File, Result};
 
 use crate::ddrv::types::Node;
+
+/// How far ahead of `ex` we refresh Discord URLs (seconds).
+pub const NODE_RENEWAL_HEADROOM_SECS: i64 = 10 * 60;
+
+/// True if any node is expired or close enough to expiry that we should refresh it now.
+pub fn nodes_need_refresh(nodes: &[Node]) -> bool {
+    let now = Utc::now().timestamp();
+    nodes
+        .iter()
+        .any(|n| n.ex > 0 && now + NODE_RENEWAL_HEADROOM_SECS >= n.ex)
+}
 
 /// Global data provider instance
 static PROVIDER: tokio::sync::OnceCell<Arc<dyn DataProvider>> = tokio::sync::OnceCell::const_new();
@@ -24,7 +34,10 @@ pub fn load(provider: Arc<dyn DataProvider>) {
 
 /// Get the global data provider
 pub fn get() -> Arc<dyn DataProvider> {
-    PROVIDER.get().expect("data provider not initialized").clone()
+    PROVIDER
+        .get()
+        .expect("data provider not initialized")
+        .clone()
 }
 
 /// The DataProvider trait abstracts over different storage backends.

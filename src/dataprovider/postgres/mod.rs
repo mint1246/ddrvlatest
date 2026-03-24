@@ -99,13 +99,11 @@ impl DataProvider for PgProvider {
         let uuid = parse_uuid(id)?;
         let parent_uuid = parent.map(parse_uuid).transpose()?;
 
-        let row = sqlx::query(
-            "SELECT id, name, dir, size, parent, mtime FROM fs WHERE id = $1",
-        )
-        .bind(uuid)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(map_sqlx_err)?;
+        let row = sqlx::query("SELECT id, name, dir, size, parent, mtime FROM fs WHERE id = $1")
+            .bind(uuid)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(map_sqlx_err)?;
 
         let file = row_to_file(&row)?;
 
@@ -228,9 +226,7 @@ impl DataProvider for PgProvider {
         let mut nodes: Vec<Node> = rows.iter().map(row_to_node).collect::<Result<Vec<_>>>()?;
 
         // Refresh any expired Discord CDN URLs
-        let now = Utc::now().timestamp();
-        let has_expired = nodes.iter().any(|n| n.ex > 0 && now > n.ex);
-        if has_expired {
+        if crate::dataprovider::nodes_need_refresh(&nodes) {
             self.driver
                 .update_nodes(&mut nodes)
                 .await
@@ -314,13 +310,11 @@ impl DataProvider for PgProvider {
     // ── path-based ops ────────────────────────────────────────────────────────
 
     async fn stat(&self, path: &str) -> Result<File> {
-        let rows = sqlx::query(
-            "SELECT id, name, dir, size, parent, mtime FROM stat($1)",
-        )
-        .bind(path)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(map_sqlx_err)?;
+        let rows = sqlx::query("SELECT id, name, dir, size, parent, mtime FROM stat($1)")
+            .bind(path)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_sqlx_err)?;
 
         rows.into_iter()
             .next()

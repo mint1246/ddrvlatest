@@ -3,14 +3,19 @@ mod dataprovider;
 mod ddrv;
 mod ftp;
 mod http;
+mod tracker;
 
+use clap::Parser;
 use std::sync::Arc;
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
-use clap::Parser;
 
 #[derive(Parser, Debug)]
-#[command(name = "ddrv", version = "2.3.0", about = "Discord-backed cloud storage")]
+#[command(
+    name = "ddrv",
+    version = "2.3.0",
+    about = "Discord-backed cloud storage"
+)]
 struct Args {
     /// Path to config file
     #[arg(long, default_value = "")]
@@ -31,7 +36,11 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     // Load config
-    let cfg = config::load(if args.config.is_empty() { None } else { Some(&args.config) })?;
+    let cfg = config::load(if args.config.is_empty() {
+        None
+    } else {
+        Some(&args.config)
+    })?;
 
     // Build driver
     let ddrv_cfg = ddrv::Config {
@@ -53,12 +62,17 @@ async fn main() -> anyhow::Result<()> {
         dataprovider::load(Arc::new(provider));
     } else if !pg_url.is_empty() {
         info!("Using PostgreSQL provider");
-        let pg_cfg = dataprovider::postgres::PostgresConfig { db_url: pg_url.clone() };
+        let pg_cfg = dataprovider::postgres::PostgresConfig {
+            db_url: pg_url.clone(),
+        };
         let provider = dataprovider::postgres::PgProvider::new(&pg_cfg, Arc::clone(&driver)).await;
         dataprovider::load(Arc::new(provider));
     } else {
         anyhow::bail!("No data provider configured. Set boltdb.db_path or postgres.db_url.");
     }
+
+    // Keep Discord CDN URLs fresh in the background so download requests stay fast.
+    tracker::spawn_auto_renewal_task();
 
     // Spawn FTP + HTTP servers
     let ftp_driver = Arc::clone(&driver);
