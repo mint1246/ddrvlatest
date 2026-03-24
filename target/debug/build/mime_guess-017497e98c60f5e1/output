@@ -1,1 +1,0 @@
-cargo:rustc-env=MIME_TYPES_GENERATED_PATH=/home/runner/work/ddrvlatest/ddrvlatest/target/debug/build/mime_guess-017497e98c60f5e1/out/mime_types_generated.rs
