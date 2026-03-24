@@ -5,7 +5,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio_util::io::ReaderStream;
 
 use super::types::{err, ApiResponse, UpdateFileRequest};
@@ -62,16 +62,8 @@ pub async fn create_file_handler(
             Err(e) => return dp_err(e),
         };
 
-        let mut nodes: Vec<Node> = Vec::new();
+        let nodes: Arc<Mutex<Vec<Node>>> = Arc::new(Mutex::new(Vec::new()));
         let file_id = file.id.clone();
-
-        let on_chunk = {
-            let nodes_ptr = &mut nodes as *mut Vec<Node>;
-            move |chunk: Node| {
-                // SAFETY: closure owns the write back, called synchronously in writer
-                unsafe { (*nodes_ptr).push(chunk) };
-            }
-        };
 
         // Use async writer; read all field bytes
         let data = match field.bytes().await {
@@ -80,7 +72,10 @@ pub async fn create_file_handler(
         };
 
         if state.config.async_write {
-            let mut writer = state.driver.new_nwriter(on_chunk);
+            let nodes_cb = Arc::clone(&nodes);
+            let mut writer = state.driver.new_nwriter(move |chunk| {
+                nodes_cb.lock().expect("nodes mutex poisoned").push(chunk);
+            });
             use tokio::io::AsyncWriteExt;
             if let Err(e) = writer.write_all(&data).await {
                 return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
@@ -89,7 +84,10 @@ pub async fn create_file_handler(
                 return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
             }
         } else {
-            let mut writer = state.driver.new_writer(on_chunk);
+            let nodes_cb = Arc::clone(&nodes);
+            let mut writer = state.driver.new_writer(move |chunk| {
+                nodes_cb.lock().expect("nodes mutex poisoned").push(chunk);
+            });
             use tokio::io::AsyncWriteExt;
             if let Err(e) = writer.write_all(&data).await {
                 return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
@@ -99,7 +97,8 @@ pub async fn create_file_handler(
             }
         }
 
-        if let Err(e) = dp.create_nodes(&file_id, &nodes).await {
+        let collected = nodes.lock().expect("nodes mutex poisoned").clone();
+        if let Err(e) = dp.create_nodes(&file_id, &collected).await {
             return dp_err(e);
         }
 

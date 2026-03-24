@@ -76,7 +76,7 @@ impl Driver {
     /// Refresh any chunks whose CDN URL has expired.
     pub async fn update_nodes(&self, chunks: &mut [Node]) -> Result<()> {
         use std::collections::HashMap;
-        use super::utils::extract_channel_id;
+        use crate::ddrv::utils::extract_channel_id;
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

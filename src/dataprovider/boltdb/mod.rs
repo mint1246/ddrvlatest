@@ -54,7 +54,7 @@ fn decode_path(id: &str) -> Result<String> {
 }
 
 fn clean_path(p: &str) -> String {
-    path_clean::clean(p)
+    path_clean::clean(p).to_string_lossy().into_owned()
 }
 
 /// Return the parent path component (never empty; root's parent is ROOT).
@@ -381,8 +381,9 @@ impl DataProvider for BoltDbProvider {
                 let all_nodes = collect_nodes_from_table(&nodes_table, &path, &start, &end_range)?;
                 let new_size: i64 = all_nodes.iter().map(|n| n.size as i64).sum();
 
-                if let Some(guard) = fs_table.get(path.as_str())? {
-                    let mut sf: StoredFile = bincode::deserialize(guard.value())?;
+                let existing = fs_table.get(path.as_str())?.map(|g| g.value().to_vec());
+                if let Some(raw) = existing {
+                    let mut sf: StoredFile = bincode::deserialize(&raw)?;
                     sf.size = new_size;
                     let data = bincode::serialize(&sf)?;
                     fs_table.insert(path.as_str(), data.as_slice())?;
@@ -419,8 +420,9 @@ impl DataProvider for BoltDbProvider {
                 }
 
                 // Reset file size
-                if let Some(guard) = fs_table.get(path.as_str())? {
-                    let mut sf: StoredFile = bincode::deserialize(guard.value())?;
+                let existing = fs_table.get(path.as_str())?.map(|g| g.value().to_vec());
+                if let Some(raw) = existing {
+                    let mut sf: StoredFile = bincode::deserialize(&raw)?;
                     sf.size = 0;
                     let data = bincode::serialize(&sf)?;
                     fs_table.insert(path.as_str(), data.as_slice())?;

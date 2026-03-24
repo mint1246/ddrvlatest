@@ -5,7 +5,8 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
-use tokio::io::{AsyncWrite, AsyncWriteExt};
+use futures::Future;
+use tokio::io::AsyncWrite;
 use tokio::task::JoinHandle;
 
 use super::rest::Rest;
@@ -106,7 +107,7 @@ impl AsyncWrite for NWriter {
             Poll::Pending => Poll::Pending,
             Poll::Ready(res) => {
                 this.closed = true;
-                let mut nodes = match res {
+                let mut nodes: Vec<Node> = match res {
                     Ok(Ok(n)) => n,
                     Ok(Err(e)) => {
                         return Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, e.to_string())))

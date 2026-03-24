@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
+use futures::Future;
 use tokio::io::AsyncWrite;
 use tokio::task::JoinHandle;
 

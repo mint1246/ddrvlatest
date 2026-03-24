@@ -6,7 +6,7 @@ mod http;
 
 use std::sync::Arc;
 use tracing::{error, info};
-use tracing_subscriber::{EnvFilter, fmt};
+use tracing_subscriber::EnvFilter;
 use clap::Parser;
 
 #[derive(Parser, Debug)]
@@ -49,11 +49,12 @@ async fn main() -> anyhow::Result<()> {
 
     if !bolt_path.is_empty() {
         info!("Using BoltDB provider at {}", bolt_path);
-        let provider = dataprovider::boltdb::BoltProvider::new(bolt_path, Arc::clone(&driver))?;
+        let provider = dataprovider::boltdb::BoltDbProvider::new(bolt_path, Arc::clone(&driver))?;
         dataprovider::load(Arc::new(provider));
     } else if !pg_url.is_empty() {
         info!("Using PostgreSQL provider");
-        let provider = dataprovider::postgres::PgProvider::new(pg_url, Arc::clone(&driver)).await?;
+        let pg_cfg = dataprovider::postgres::PostgresConfig { db_url: pg_url.clone() };
+        let provider = dataprovider::postgres::PgProvider::new(&pg_cfg, Arc::clone(&driver)).await;
         dataprovider::load(Arc::new(provider));
     } else {
         anyhow::bail!("No data provider configured. Set boltdb.db_path or postgres.db_url.");
@@ -84,4 +85,3 @@ async fn main() -> anyhow::Result<()> {
 
     Ok(())
 }
-

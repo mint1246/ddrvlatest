@@ -1,22 +1,15 @@
 use axum::{
     body::Body,
-    http::{Request, Response, StatusCode, Uri},
+    http::{Response, StatusCode, Uri},
     response::IntoResponse,
 };
 use rust_embed::RustEmbed;
-use tower::ServiceExt;
-use tower_http::services::ServeDir;
 
 #[derive(RustEmbed)]
 #[folder = "internal/http/web/static/"]
 struct Static;
 
-/// Returns an Axum service that serves the embedded static files.
-pub fn static_handler() -> axum::routing::MethodRouter<crate::http::AppState> {
-    axum::routing::get(serve_static)
-}
-
-async fn serve_static(uri: Uri) -> impl IntoResponse {
+pub async fn serve_static(uri: Uri) -> impl IntoResponse {
     let path = uri.path().trim_start_matches('/');
     let path = if path.is_empty() { "index.html" } else { path };
 

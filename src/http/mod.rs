@@ -32,7 +32,7 @@ pub async fn serve(driver: Arc<crate::ddrv::Driver>, config: HttpConfig) -> anyh
         // API routes
         .nest("/api", api::router(state.clone()))
         // Static web UI
-        .fallback_service(web::static_handler())
+        .fallback(get(web::serve_static))
         .layer(CorsLayer::permissive())
         .with_state(state);
 

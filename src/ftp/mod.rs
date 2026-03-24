@@ -1,6 +1,6 @@
 use std::fmt::Debug;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use libunftp::auth::{AuthenticationError, Authenticator, Credentials, DefaultUser};
@@ -55,7 +55,7 @@ fn dp_err(e: DataProviderError) -> Error {
             Error::new(ErrorKind::PermanentFileNotAvailable, e)
         }
         DataProviderError::AlreadyExists => {
-            Error::new(ErrorKind::FileNameNotAllowed, e)
+            Error::new(ErrorKind::FileNameNotAllowedError, e)
         }
         DataProviderError::PermissionDenied => {
             Error::new(ErrorKind::PermissionDenied, e)
@@ -66,9 +66,18 @@ fn dp_err(e: DataProviderError) -> Error {
 
 // ── Storage backend ───────────────────────────────────────────────────────────
 
+#[derive(Clone)]
 pub struct DdrvStorage {
     driver: Arc<crate::ddrv::Driver>,
     async_write: bool,
+}
+
+impl std::fmt::Debug for DdrvStorage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DdrvStorage")
+            .field("async_write", &self.async_write)
+            .finish()
+    }
 }
 
 impl DdrvStorage {
@@ -83,7 +92,7 @@ impl StorageBackend<DefaultUser> for DdrvStorage {
 
     async fn metadata<P: AsRef<Path> + Send + Debug>(
         &self,
-        _user: &Option<DefaultUser>,
+        _user: &DefaultUser,
         path: P,
     ) -> Result<Self::Metadata> {
         let dp = crate::dataprovider::get();
@@ -96,7 +105,7 @@ impl StorageBackend<DefaultUser> for DdrvStorage {
 
     async fn list<P: AsRef<Path> + Send + Debug>(
         &self,
-        _user: &Option<DefaultUser>,
+        _user: &DefaultUser,
         path: P,
     ) -> Result<Vec<Fileinfo<PathBuf, Self::Metadata>>> {
         let dp = crate::dataprovider::get();
@@ -120,7 +129,7 @@ impl StorageBackend<DefaultUser> for DdrvStorage {
 
     async fn get<P: AsRef<Path> + Send + Debug>(
         &self,
-        _user: &Option<DefaultUser>,
+        _user: &DefaultUser,
         path: P,
         start_pos: u64,
     ) -> Result<Box<dyn tokio::io::AsyncRead + Send + Sync + Unpin + 'static>> {
@@ -135,17 +144,20 @@ impl StorageBackend<DefaultUser> for DdrvStorage {
             .await
             .map_err(|e| Error::new(ErrorKind::LocalError, e))?;
 
-        let reader = self
+        let mut reader = self
             .driver
             .new_reader(nodes, start_pos as i64)
             .map_err(|e| Error::new(ErrorKind::LocalError, e))?;
-
-        Ok(Box::new(reader))
+        let (mut tx, rx) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(async move {
+            let _ = tokio::io::copy(&mut reader, &mut tx).await;
+        });
+        Ok(Box::new(rx))
     }
 
     async fn put<P: AsRef<Path> + Send + Debug, R: tokio::io::AsyncRead + Send + Sync + Unpin + 'static>(
         &self,
-        _user: &Option<DefaultUser>,
+        _user: &DefaultUser,
         mut input: R,
         path: P,
         _start_pos: u64,
@@ -158,11 +170,14 @@ impl StorageBackend<DefaultUser> for DdrvStorage {
         let file = dp.stat(&path_s).await.map_err(dp_err)?;
         dp.truncate(&file.id).await.map_err(dp_err)?;
 
-        let mut nodes: Vec<crate::ddrv::types::Node> = Vec::new();
+        let nodes = Arc::new(Mutex::new(Vec::<crate::ddrv::types::Node>::new()));
         let mut total: u64 = 0;
 
         if self.async_write {
-            let mut writer = self.driver.new_nwriter(|node| nodes.push(node));
+            let nodes_cb = Arc::clone(&nodes);
+            let mut writer = self.driver.new_nwriter(move |node| {
+                nodes_cb.lock().expect("nodes mutex poisoned").push(node);
+            });
             let mut buf = vec![0u8; 64 * 1024];
             loop {
                 let n = input
@@ -181,7 +196,10 @@ impl StorageBackend<DefaultUser> for DdrvStorage {
                 .await
                 .map_err(|e| Error::new(ErrorKind::LocalError, e))?;
         } else {
-            let mut writer = self.driver.new_writer(|node| nodes.push(node));
+            let nodes_cb = Arc::clone(&nodes);
+            let mut writer = self.driver.new_writer(move |node| {
+                nodes_cb.lock().expect("nodes mutex poisoned").push(node);
+            });
             let mut buf = vec![0u8; 64 * 1024];
             loop {
                 let n = input
@@ -201,14 +219,15 @@ impl StorageBackend<DefaultUser> for DdrvStorage {
                 .map_err(|e| Error::new(ErrorKind::LocalError, e))?;
         }
 
-        dp.create_nodes(&file.id, &nodes).await.map_err(dp_err)?;
+        let final_nodes = nodes.lock().expect("nodes mutex poisoned").clone();
+        dp.create_nodes(&file.id, &final_nodes).await.map_err(dp_err)?;
 
         Ok(total)
     }
 
     async fn del<P: AsRef<Path> + Send + Debug>(
         &self,
-        _user: &Option<DefaultUser>,
+        _user: &DefaultUser,
         path: P,
     ) -> Result<()> {
         let dp = crate::dataprovider::get();
@@ -217,7 +236,7 @@ impl StorageBackend<DefaultUser> for DdrvStorage {
 
     async fn mkd<P: AsRef<Path> + Send + Debug>(
         &self,
-        _user: &Option<DefaultUser>,
+        _user: &DefaultUser,
         path: P,
     ) -> Result<()> {
         let dp = crate::dataprovider::get();
@@ -226,7 +245,7 @@ impl StorageBackend<DefaultUser> for DdrvStorage {
 
     async fn rename<P: AsRef<Path> + Send + Debug>(
         &self,
-        _user: &Option<DefaultUser>,
+        _user: &DefaultUser,
         from: P,
         to: P,
     ) -> Result<()> {
@@ -238,7 +257,7 @@ impl StorageBackend<DefaultUser> for DdrvStorage {
 
     async fn rmd<P: AsRef<Path> + Send + Debug>(
         &self,
-        _user: &Option<DefaultUser>,
+        _user: &DefaultUser,
         path: P,
     ) -> Result<()> {
         let dp = crate::dataprovider::get();
@@ -247,7 +266,7 @@ impl StorageBackend<DefaultUser> for DdrvStorage {
 
     async fn cwd<P: AsRef<Path> + Send + Debug>(
         &self,
-        _user: &Option<DefaultUser>,
+        _user: &DefaultUser,
         path: P,
     ) -> Result<()> {
         let dp = crate::dataprovider::get();
@@ -258,6 +277,7 @@ impl StorageBackend<DefaultUser> for DdrvStorage {
 
 // ── Authenticator ─────────────────────────────────────────────────────────────
 
+#[derive(Debug)]
 pub struct DdrvAuthenticator {
     pub username: String,
     pub password: String,
@@ -298,10 +318,10 @@ pub async fn serve(
         return Ok(());
     }
 
-    let storage = Arc::new(DdrvStorage {
+    let storage = DdrvStorage {
         driver: driver.clone(),
         async_write: config.async_write,
-    });
+    };
 
     let authenticator = DdrvAuthenticator {
         username: config.username.clone(),
@@ -309,17 +329,19 @@ pub async fn serve(
     };
 
     let mut builder = libunftp::ServerBuilder::new(Box::new(move || {
-        Arc::clone(&storage)
+        storage.clone()
     }))
     .greeting("DDrv FTP Server")
-    .idle_session_timeout(std::time::Duration::from_secs(86400))
+    .idle_session_timeout(86400)
     .authenticator(Arc::new(authenticator));
 
     if let Some(port_range) = &config.port_range {
         let parts: Vec<&str> = port_range.splitn(2, '-').collect();
         if parts.len() == 2 {
             if let (Ok(start), Ok(end)) = (parts[0].parse::<u16>(), parts[1].parse::<u16>()) {
-                builder = builder.passive_ports(start..=end);
+                if start < end {
+                    builder = builder.passive_ports(start..end);
+                }
             }
         }
     }

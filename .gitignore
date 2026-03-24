@@ -23,4 +23,5 @@ go.work
 
 .env
 /ddrv
-config.yamltarget/
+config.yaml
+target/

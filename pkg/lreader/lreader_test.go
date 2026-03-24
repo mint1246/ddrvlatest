@@ -45,7 +45,7 @@ func TestLimitReader(t *testing.T) {
 
 	for _, tc := range tt {
 		t.Run(tc.name, func(t *testing.T) {
-			reader := bytes.NewBufferString(tc.input)
+			reader := io.NopCloser(bytes.NewBufferString(tc.input))
 			lReader := New(reader, tc.limit)
 
 			buffer := make([]byte, len(tc.input))
