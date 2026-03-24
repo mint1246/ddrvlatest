@@ -5,7 +5,7 @@ on:
 
 jobs:
   build:
-    name: Build (${{ matrix.os }})
+    name: Build (${{ matrix.asset_name }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -15,10 +15,17 @@ jobs:
             target: x86_64-unknown-linux-gnu
             artifact_name: ddrv
             asset_name: ddrv-linux-x86_64
+            use_cross: false
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            artifact_name: ddrv
+            asset_name: ddrv-linux-aarch64
+            use_cross: true
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact_name: ddrv.exe
             asset_name: ddrv-windows-x86_64.exe
+            use_cross: false
 
     steps:
       - name: Checkout
@@ -29,6 +36,10 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Install cross
+        if: matrix.use_cross == true
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
@@ -36,11 +47,16 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ matrix.target }}-cargo-
 
-      - name: Build release binary
+      - name: Build release binary (native)
+        if: matrix.use_cross == false
         run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Build release binary (cross)
+        if: matrix.use_cross == true
+        run: cross build --release --target ${{ matrix.target }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
