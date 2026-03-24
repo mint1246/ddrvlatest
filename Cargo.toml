@@ -1,0 +1,86 @@
+[package]
+name = "ddrv"
+version = "2.3.0"
+edition = "2021"
+
+[[bin]]
+name = "ddrv"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP client for Discord API
+reqwest = { version = "0.12", features = ["json", "multipart", "stream"] }
+
+# HTTP server
+axum = { version = "0.7", features = ["multipart"] }
+axum-extra = { version = "0.9", features = ["typed-header"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace", "fs"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+bincode = "1"
+
+# Configuration
+config = "0.14"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "1"
+
+# JWT
+jsonwebtoken = "9"
+
+# UUID
+uuid = { version = "1", features = ["v4"] }
+
+# Embedded key-value store (redb replaces BoltDB)
+redb = "2"
+
+# PostgreSQL
+sqlx = { version = "0.7", features = ["postgres", "runtime-tokio-native-tls", "uuid", "chrono", "macros"] }
+
+# FTP server
+libunftp = "0.20"
+async-trait = "0.1"
+
+# DateTime
+chrono = { version = "0.4", features = ["serde"] }
+
+# Static file embedding
+rust-embed = "8"
+
+# Async utilities
+futures = "0.3"
+tokio-util = { version = "0.7", features = ["io", "compat"] }
+bytes = "1"
+
+# Random
+rand = "0.8"
+
+# CLI args
+clap = { version = "4", features = ["derive"] }
+
+# Regex
+regex = "1"
+
+# Base64
+base64 = "0.22"
+
+# Mime types
+mime_guess = "2"
+
+# HTTP headers
+headers = "0.3"
+
+# Path utilities
+path-clean = "1"
