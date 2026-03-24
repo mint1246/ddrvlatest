@@ -159,9 +159,11 @@ async fn run_workers(
                 }
 
                 // Read exactly `chunk_size` bytes, or fewer at EOF.
-                let data = {
+                // The sequence number is assigned inside the same critical section
+                // so that read order == sequence order even under concurrent workers.
+                let (data, seq) = {
                     let mut r = reader.lock().await;
-                    match read_chunk(&mut *r, chunk_size).await {
+                    let chunk = match read_chunk(&mut *r, chunk_size).await {
                         Ok(Some(d)) => d,
                         Ok(None) => return, // clean EOF
                         Err(e) => {
@@ -171,12 +173,10 @@ async fn run_workers(
                             }
                             return;
                         }
-                    }
+                    };
+                    let seq = counter.fetch_add(1, Ordering::SeqCst);
+                    (chunk, seq)
                 };
-
-                // Grab a sequence number while still holding the reader lock
-                // order: counter incremented before uploading so order is preserved.
-                let seq = counter.fetch_add(1, Ordering::SeqCst);
 
                 match rest.create_attachment(data).await {
                     Ok(mut node) => {
