@@ -1,15 +1,21 @@
 use axum::{
     body::Body,
-    extract::{Multipart, Path, State},
+    extract::{Multipart, Path, Query, State},
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
+use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use tokio_util::io::ReaderStream;
 
 use super::types::{err, ApiResponse, UpdateFileRequest};
-use crate::{dataprovider, dataprovider::types::DataProviderError, ddrv::types::Node, http::AppState};
+use crate::{
+    dataprovider,
+    dataprovider::types::DataProviderError,
+    ddrv::{types::Node, utils::encode_attachment_url},
+    http::AppState,
+};
 
 fn dp_err(e: DataProviderError) -> Response {
     match e {
@@ -147,10 +153,106 @@ pub async fn delete_file_handler(
     }
 }
 
+/// A single chunk entry returned by the manifest endpoint.
+#[derive(Serialize)]
+pub struct ChunkInfo {
+    /// Authenticated Discord CDN URL for this chunk (includes `ex`/`is`/`hm` params).
+    pub url: String,
+    /// Start byte offset of this chunk within the complete file.
+    pub start: u64,
+    /// End byte offset (inclusive) of this chunk within the complete file.
+    pub end: u64,
+    /// Byte size of this chunk.
+    pub size: u64,
+}
+
+/// Response body returned by `GET /files/:id/manifest`.
+#[derive(Serialize)]
+pub struct FileManifest {
+    pub id: String,
+    pub name: String,
+    pub size: i64,
+    pub mime: String,
+    pub chunks: Vec<ChunkInfo>,
+}
+
+/// Query params understood by the download handler.
+#[derive(Deserialize, Default)]
+pub struct DownloadQuery {
+    /// When present (any value: `?direct`, `?direct=1`, `?direct=true`), single-chunk
+    /// files are served via HTTP 307 redirect to Discord CDN, removing the server from
+    /// the download path entirely.  Multi-chunk files receive a 303 redirect to the
+    /// `/files/:id/manifest` endpoint so the client can perform client-side reconstruction.
+    pub direct: Option<String>,
+}
+
+/// GET /files/:id/manifest  (no auth)
+///
+/// Returns a JSON manifest listing every authenticated Discord CDN chunk URL
+/// and its byte-range metadata.  Clients can use this to download all chunks
+/// directly from Discord CDN and reassemble the file locally, removing the
+/// server as a bandwidth bottleneck entirely.
+pub async fn manifest_file_handler(
+    State(_state): State<AppState>,
+    Path(id): Path<String>,
+) -> Response {
+    let dp = dataprovider::get();
+
+    let file = match dp.get_by_id(&id, None).await {
+        Ok(f) => f,
+        Err(DataProviderError::NotFound) => return err(StatusCode::NOT_FOUND, "not found"),
+        Err(e) => return dp_err(e),
+    };
+
+    let nodes = match dp.get_nodes(&id).await {
+        Ok(n) => n,
+        Err(e) => return dp_err(e),
+    };
+
+    let ext = std::path::Path::new(&file.name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
+    let mime = mime_guess::from_ext(ext)
+        .first_or_octet_stream()
+        .to_string();
+
+    // Build absolute byte offsets for each chunk.
+    // This mirrors the offset arithmetic in `ddrv::reader::Reader::new` so that
+    // clients can use `Range: bytes={start}-{end}` when fetching each chunk URL.
+    let mut offset: u64 = 0;
+    let chunks: Vec<ChunkInfo> = nodes
+        .iter()
+        .map(|n| {
+            let start = offset;
+            let size = n.size as u64;
+            let end = offset + size - 1;
+            offset = end + 1;
+            ChunkInfo {
+                url: encode_attachment_url(&n.url, n.ex, n.is, &n.hm),
+                start,
+                end,
+                size,
+            }
+        })
+        .collect();
+
+    let manifest = FileManifest {
+        id: file.id.clone(),
+        name: file.name.clone(),
+        size: file.size,
+        mime,
+        chunks,
+    };
+
+    (StatusCode::OK, Json(manifest)).into_response()
+}
+
 /// GET /files/:id  and  GET /files/:id/:fname  (no auth)
 pub async fn download_file_handler(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(query): Query<DownloadQuery>,
     headers: HeaderMap,
 ) -> Response {
     let dp = dataprovider::get();
@@ -165,6 +267,32 @@ pub async fn download_file_handler(
         Ok(n) => n,
         Err(e) => return dp_err(e),
     };
+
+    // ------------------------------------------------------------------
+    // ?direct=1 – remove the server from the download path entirely.
+    //
+    // • Single-chunk file: HTTP 307 redirect straight to the Discord CDN
+    //   URL so the client downloads the bytes without touching this server.
+    // • Multi-chunk file:  HTTP 303 redirect to /files/:id/manifest so the
+    //   client can fetch each chunk from Discord CDN and reassemble locally.
+    // ------------------------------------------------------------------
+    if query.direct.is_some() {
+        if nodes.len() == 1 {
+            let cdn_url = encode_attachment_url(&nodes[0].url, nodes[0].ex, nodes[0].is, &nodes[0].hm);
+            return (
+                StatusCode::TEMPORARY_REDIRECT,
+                [(header::LOCATION, cdn_url)],
+            )
+                .into_response();
+        } else {
+            let manifest_url = format!("/files/{}/manifest", id);
+            return (
+                StatusCode::SEE_OTHER,
+                [(header::LOCATION, manifest_url)],
+            )
+                .into_response();
+        }
+    }
 
     // Determine content-type from file name
     let ext = std::path::Path::new(&file.name)
