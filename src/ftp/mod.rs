@@ -51,15 +51,9 @@ impl Metadata for DdrvMetadata {
 
 fn dp_err(e: DataProviderError) -> Error {
     match e {
-        DataProviderError::NotFound => {
-            Error::new(ErrorKind::PermanentFileNotAvailable, e)
-        }
-        DataProviderError::AlreadyExists => {
-            Error::new(ErrorKind::FileNameNotAllowedError, e)
-        }
-        DataProviderError::PermissionDenied => {
-            Error::new(ErrorKind::PermissionDenied, e)
-        }
+        DataProviderError::NotFound => Error::new(ErrorKind::PermanentFileNotAvailable, e),
+        DataProviderError::AlreadyExists => Error::new(ErrorKind::FileNameNotAllowedError, e),
+        DataProviderError::PermissionDenied => Error::new(ErrorKind::PermissionDenied, e),
         _ => Error::new(ErrorKind::LocalError, e),
     }
 }
@@ -96,10 +90,7 @@ impl StorageBackend<DefaultUser> for DdrvStorage {
         path: P,
     ) -> Result<Self::Metadata> {
         let dp = crate::dataprovider::get();
-        let file = dp
-            .stat(&Self::path_str(path))
-            .await
-            .map_err(dp_err)?;
+        let file = dp.stat(&Self::path_str(path)).await.map_err(dp_err)?;
         Ok(DdrvMetadata { inner: file })
     }
 
@@ -109,10 +100,7 @@ impl StorageBackend<DefaultUser> for DdrvStorage {
         path: P,
     ) -> Result<Vec<Fileinfo<PathBuf, Self::Metadata>>> {
         let dp = crate::dataprovider::get();
-        let files = dp
-            .ls(&Self::path_str(path), 0, 0)
-            .await
-            .map_err(dp_err)?;
+        let files = dp.ls(&Self::path_str(path), 0, 0).await.map_err(dp_err)?;
 
         let result = files
             .into_iter()
@@ -148,14 +136,17 @@ impl StorageBackend<DefaultUser> for DdrvStorage {
             .driver
             .new_reader(nodes, start_pos as i64)
             .map_err(|e| Error::new(ErrorKind::LocalError, e))?;
-        let (mut tx, rx) = tokio::io::duplex(64 * 1024);
+        let (mut tx, rx) = tokio::io::duplex(256 * 1024);
         tokio::spawn(async move {
             let _ = tokio::io::copy(&mut reader, &mut tx).await;
         });
         Ok(Box::new(rx))
     }
 
-    async fn put<P: AsRef<Path> + Send + Debug, R: tokio::io::AsyncRead + Send + Sync + Unpin + 'static>(
+    async fn put<
+        P: AsRef<Path> + Send + Debug,
+        R: tokio::io::AsyncRead + Send + Sync + Unpin + 'static,
+    >(
         &self,
         _user: &DefaultUser,
         mut input: R,
@@ -189,7 +180,7 @@ impl StorageBackend<DefaultUser> for DdrvStorage {
             let mut writer = self.driver.new_nwriter(move |node| {
                 nodes_cb.lock().expect("nodes mutex poisoned").push(node);
             });
-            let mut buf = vec![0u8; 64 * 1024];
+            let mut buf = vec![0u8; 256 * 1024];
             loop {
                 let n = input
                     .read(&mut buf)
@@ -220,7 +211,7 @@ impl StorageBackend<DefaultUser> for DdrvStorage {
             let mut writer = self.driver.new_writer(move |node| {
                 nodes_cb.lock().expect("nodes mutex poisoned").push(node);
             });
-            let mut buf = vec![0u8; 64 * 1024];
+            let mut buf = vec![0u8; 256 * 1024];
             loop {
                 let n = input
                     .read(&mut buf)
@@ -272,20 +263,12 @@ impl StorageBackend<DefaultUser> for DdrvStorage {
         Ok(total)
     }
 
-    async fn del<P: AsRef<Path> + Send + Debug>(
-        &self,
-        _user: &DefaultUser,
-        path: P,
-    ) -> Result<()> {
+    async fn del<P: AsRef<Path> + Send + Debug>(&self, _user: &DefaultUser, path: P) -> Result<()> {
         let dp = crate::dataprovider::get();
         dp.rm(&Self::path_str(path)).await.map_err(dp_err)
     }
 
-    async fn mkd<P: AsRef<Path> + Send + Debug>(
-        &self,
-        _user: &DefaultUser,
-        path: P,
-    ) -> Result<()> {
+    async fn mkd<P: AsRef<Path> + Send + Debug>(&self, _user: &DefaultUser, path: P) -> Result<()> {
         let dp = crate::dataprovider::get();
         dp.mkdir(&Self::path_str(path)).await.map_err(dp_err)
     }
@@ -302,20 +285,12 @@ impl StorageBackend<DefaultUser> for DdrvStorage {
             .map_err(dp_err)
     }
 
-    async fn rmd<P: AsRef<Path> + Send + Debug>(
-        &self,
-        _user: &DefaultUser,
-        path: P,
-    ) -> Result<()> {
+    async fn rmd<P: AsRef<Path> + Send + Debug>(&self, _user: &DefaultUser, path: P) -> Result<()> {
         let dp = crate::dataprovider::get();
         dp.rm(&Self::path_str(path)).await.map_err(dp_err)
     }
 
-    async fn cwd<P: AsRef<Path> + Send + Debug>(
-        &self,
-        _user: &DefaultUser,
-        path: P,
-    ) -> Result<()> {
+    async fn cwd<P: AsRef<Path> + Send + Debug>(&self, _user: &DefaultUser, path: P) -> Result<()> {
         let dp = crate::dataprovider::get();
         dp.stat(&Self::path_str(path)).await.map_err(dp_err)?;
         Ok(())
@@ -375,12 +350,10 @@ pub async fn serve(
         password: config.password.clone(),
     };
 
-    let mut builder = libunftp::ServerBuilder::new(Box::new(move || {
-        storage.clone()
-    }))
-    .greeting("DDrv FTP Server")
-    .idle_session_timeout(86400)
-    .authenticator(Arc::new(authenticator));
+    let mut builder = libunftp::ServerBuilder::new(Box::new(move || storage.clone()))
+        .greeting("DDrv FTP Server")
+        .idle_session_timeout(86400)
+        .authenticator(Arc::new(authenticator));
 
     if let Some(port_range) = &config.port_range {
         let parts: Vec<&str> = port_range.splitn(2, '-').collect();
@@ -411,11 +384,7 @@ async fn fetch_public_ip() -> Option<std::net::Ipv4Addr> {
         .timeout(std::time::Duration::from_secs(5))
         .build()
         .ok()?;
-    let resp = client
-        .get("https://ipinfo.io/ip")
-        .send()
-        .await
-        .ok()?;
+    let resp = client.get("https://ipinfo.io/ip").send().await.ok()?;
     let text = resp.text().await.ok()?;
     text.trim().parse().ok()
 }

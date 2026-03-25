@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use sqlx::Row as _;
+use sqlx::{Postgres, QueryBuilder, Row as _};
 use std::sync::Arc;
 
 use crate::dataprovider::{DataProvider, DataProviderError, File, Result};
@@ -232,21 +232,24 @@ impl DataProvider for PgProvider {
                 .await
                 .map_err(|e| DataProviderError::Other(e.to_string()))?;
 
-            // Persist refreshed URL/expiry data back to the database
-            for n in &nodes {
-                sqlx::query(
-                    r#"UPDATE node SET url = $1, ex = $2, "is" = $3, hm = $4
-                       WHERE id = $5"#,
-                )
-                .bind(&n.url)
-                .bind(n.ex)
-                .bind(n.is)
-                .bind(&n.hm)
-                .bind(n.nid)
-                .execute(&self.pool)
-                .await
-                .map_err(map_sqlx_err)?;
-            }
+            // Persist refreshed URL/expiry data back to the database in a single statement.
+            let mut qb: QueryBuilder<Postgres> = QueryBuilder::new(
+                r#"UPDATE node AS n
+                   SET url = v.url, ex = v.ex, "is" = v.is, hm = v.hm
+                   FROM ("#,
+            );
+            qb.push_values(nodes.iter(), |mut b, n| {
+                b.push_bind(n.nid)
+                    .push_bind(&n.url)
+                    .push_bind(n.ex)
+                    .push_bind(n.is)
+                    .push_bind(&n.hm);
+            });
+            qb.push(
+                r#") AS v(id, url, ex, "is", hm)
+                      WHERE n.id = v.id"#,
+            );
+            qb.build().execute(&self.pool).await.map_err(map_sqlx_err)?;
         }
         Ok(nodes)
     }
@@ -257,24 +260,23 @@ impl DataProvider for PgProvider {
         }
         let uuid = parse_uuid(id)?;
 
-        for n in nodes {
-            sqlx::query(
-                r#"INSERT INTO node (file, url, size, "start", "end", mid, ex, "is", hm)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"#,
-            )
-            .bind(uuid)
-            .bind(&n.url)
-            .bind(n.size as i64)
-            .bind(n.start)
-            .bind(n.end)
-            .bind(n.mid)
-            .bind(n.ex)
-            .bind(n.is)
-            .bind(&n.hm)
-            .execute(&self.pool)
-            .await
-            .map_err(map_sqlx_err)?;
-        }
+        let mut tx = self.pool.begin().await.map_err(map_sqlx_err)?;
+
+        let mut qb: QueryBuilder<Postgres> = QueryBuilder::new(
+            r#"INSERT INTO node (file, url, size, "start", "end", mid, ex, "is", hm) "#,
+        );
+        qb.push_values(nodes.iter(), |mut b, n| {
+            b.push_bind(uuid)
+                .push_bind(&n.url)
+                .push_bind(n.size as i64)
+                .push_bind(n.start)
+                .push_bind(n.end)
+                .push_bind(n.mid)
+                .push_bind(n.ex)
+                .push_bind(n.is)
+                .push_bind(&n.hm);
+        });
+        qb.build().execute(&mut *tx).await.map_err(map_sqlx_err)?;
 
         // Update the file's aggregate size
         sqlx::query(
@@ -282,10 +284,11 @@ impl DataProvider for PgProvider {
              WHERE id = $1",
         )
         .bind(uuid)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(map_sqlx_err)?;
 
+        tx.commit().await.map_err(map_sqlx_err)?;
         Ok(())
     }
 

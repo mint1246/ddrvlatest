@@ -74,10 +74,7 @@ pub async fn auth_middleware(
     // Guest mode: allow read-only methods without auth.
     if cfg.guest_mode {
         let method = request.method();
-        if matches!(
-            *method,
-            Method::GET | Method::HEAD | Method::OPTIONS
-        ) {
+        if matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS) {
             return next.run(request).await;
         }
     }
