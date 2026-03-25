@@ -348,6 +348,89 @@ impl DataProvider for BoltDbProvider {
         Ok(nodes)
     }
 
+    async fn get_nodes_paged(
+        &self,
+        id: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<(Vec<Node>, usize, u64)> {
+        let path = decode_path(id)?;
+        let db = Arc::clone(&self.db);
+
+        // Read all persisted nodes to determine the total count and compute the
+        // cumulative byte offset at the start of the requested page.  Only the
+        // node metadata (URL, size, timestamps) is read – actual file bytes are
+        // never loaded here.  Node counts in practice are small (typically < 100
+        // even for multi-GB files at 25 MB/chunk), so this is not a concern.
+        let path_clone = path.clone();
+        let all_nodes: Vec<Node> = tokio::task::spawn_blocking(move || -> Result<Vec<Node>> {
+            let db = db.read().unwrap();
+            let read_txn = db.begin_read()?;
+            let table = read_txn.open_table(NODES_TABLE)?;
+            collect_nodes(&table, &path_clone)
+        })
+        .await
+        .map_err(|e| DataProviderError::Other(e.to_string()))??;
+
+        let total = all_nodes.len();
+
+        // Compute the cumulative byte offset at the start of the requested page.
+        let byte_offset: u64 = all_nodes
+            .iter()
+            .take(offset)
+            .map(|n| n.size as u64)
+            .sum();
+
+        if offset >= total || limit == 0 {
+            return Ok((Vec::new(), total, byte_offset));
+        }
+
+        let end = (offset + limit).min(total);
+        let mut page: Vec<Node> = all_nodes[offset..end].to_vec();
+
+        // Refresh only the nodes in the requested page to limit Discord API calls.
+        if crate::dataprovider::nodes_need_refresh(&page) {
+            self.driver
+                .update_nodes(&mut page)
+                .await
+                .map_err(|e| DataProviderError::Other(e.to_string()))?;
+
+            // Persist the refreshed page nodes back to the database.
+            let db2 = Arc::clone(&self.db);
+            let updated = page.clone();
+            let path2 = path.clone();
+            tokio::task::spawn_blocking(move || -> Result<()> {
+                let db = db2.write().unwrap();
+                let write_txn = db.begin_write()?;
+                {
+                    let mut table = write_txn.open_table(NODES_TABLE)?;
+                    for n in &updated {
+                        let key = node_key(&path2, n.nid);
+                        let sn = StoredNode {
+                            nid: n.nid,
+                            url: n.url.clone(),
+                            size: n.size,
+                            start: n.start,
+                            end: n.end,
+                            mid: n.mid,
+                            ex: n.ex,
+                            is: n.is,
+                            hm: n.hm.clone(),
+                        };
+                        let data = bincode::serialize(&sn)?;
+                        table.insert(key.as_str(), data.as_slice())?;
+                    }
+                }
+                write_txn.commit()?;
+                Ok(())
+            })
+            .await
+            .map_err(|e| DataProviderError::Other(e.to_string()))??;
+        }
+
+        Ok((page, total, byte_offset))
+    }
+
     async fn create_nodes(&self, id: &str, nodes: &[Node]) -> Result<()> {
         if nodes.is_empty() {
             return Ok(());

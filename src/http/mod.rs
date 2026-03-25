@@ -32,6 +32,8 @@ pub async fn serve(driver: Arc<crate::ddrv::Driver>, config: HttpConfig) -> anyh
             "/files/:id/:fname",
             get(api::files::download_file_with_name_handler),
         )
+        // Manifest route – returns chunk URLs for client-side reconstruction (no auth)
+        .route("/files/:id/manifest", get(api::files::manifest_file_handler))
         // API routes
         .nest("/api", api::router(state.clone()))
         // Static web UI
