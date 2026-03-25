@@ -4,7 +4,9 @@ app.config(['$httpProvider', function ($httpProvider) {
     $httpProvider.interceptors.push(['$q', '$rootScope', '$location', function ($q, $rootScope, $location) {
         return {
             'responseError': function (rejection) {
-                if (rejection.status === 401 && $location.path() !== '/api/check_token') {
+                const requestUrl = (rejection.config && rejection.config.url) || '';
+                const ignored = requestUrl === '/api/check_token' || requestUrl === '/api/config' || requestUrl === '/api/user/login';
+                if (rejection.status === 401 && !ignored && $location.path() !== '/api/check_token') {
                     $rootScope.$broadcast('loginRequired');
                 }
                 return $q.reject(rejection);
@@ -16,16 +18,21 @@ app.config(['$httpProvider', function ($httpProvider) {
 app.run(['$rootScope', 'AuthService', '$location', function ($rootScope, AuthService, $location) {
     $rootScope.config = {}
     $rootScope.appCrashed = false
+    $rootScope.authenticated = false
     AuthService.config().then((config) => {
-        $rootScope.authenticated = false
         $rootScope.$apply(() => $rootScope.config = config.data);
         if (config.data.login && AuthService.getToken()) {
             AuthService.checkToken().then(() => {
                 $rootScope.authenticated = true
             }).catch(() => {
+                AuthService.logout(false)
                 if (!config.data.anonymous) $rootScope.showLoginModal()
             })
+        } else if (config.data.login && !config.data.anonymous) {
+            $rootScope.showLoginModal()
         }
+    }).catch(() => {
+        $rootScope.$apply(() => $rootScope.appCrashed = true)
     })
 
     $rootScope.showLoginModal = function () {
@@ -53,8 +60,13 @@ app.controller('authController', ['$scope', '$rootScope', 'AuthService', functio
             $rootScope.$apply(() => {
                 $rootScope.authenticated = true
             })
+            $scope.$apply(() => {
+                $scope.password = '';
+                $scope.loginErrMessage = '';
+            })
         } catch (err) {
-            $scope.$apply(() => $scope.loginErrMessage = err.data.message);
+            const msg = err?.data?.message || 'Login failed';
+            $scope.$apply(() => $scope.loginErrMessage = msg);
         }
     }
 
@@ -63,10 +75,15 @@ app.controller('authController', ['$scope', '$rootScope', 'AuthService', functio
     }
 }])
 
-app.controller('controller', ['$scope', 'FMService', '$interval', function ($scope, FMService, $interval) {
+app.controller('controller', ['$scope', '$rootScope', 'FMService', '$interval', function ($scope, $rootScope, FMService, $interval) {
 
     // current directory
     $scope.directory = {files: []}
+    $scope.filterText = ''
+    $scope.sortBy = 'name'
+    $scope.sortDesc = false
+    $scope.isDragging = false
+    $scope.statusMessage = ''
 
     $scope.selectAll = function (selectAllCheckbox) {
         $scope.directory.files.forEach(function (file) {
@@ -100,7 +117,44 @@ app.controller('controller', ['$scope', 'FMService', '$interval', function ($sco
     $scope.load = function (id) {
         FMService.getDir(id).then((directory) => {
             $scope.$apply(() => $scope.directory = directory)
+        }).catch((err) => {
+            const msg = err?.data?.message || 'Failed to load directory'
+            $scope.$apply(() => $scope.statusMessage = msg)
         })
+    }
+
+    $scope.filteredFiles = function () {
+        const query = ($scope.filterText || '').toLowerCase().trim()
+        const files = ($scope.directory.files || []).filter((file) => !query || file.name.toLowerCase().includes(query))
+        const key = $scope.sortBy
+        const dirFirst = function (a, b) {
+            if (a.dir === b.dir) return 0
+            return a.dir ? -1 : 1
+        }
+        files.sort((a, b) => {
+            const d = dirFirst(a, b)
+            if (d !== 0) return d
+            let av = a[key]
+            let bv = b[key]
+            if (key === 'mtime') {
+                av = new Date(av).getTime()
+                bv = new Date(bv).getTime()
+            } else if (key === 'size') {
+                av = a.dir ? -1 : Number(a.raw_size)
+                bv = b.dir ? -1 : Number(b.raw_size)
+            } else {
+                av = String(av || '').toLowerCase()
+                bv = String(bv || '').toLowerCase()
+            }
+            if (av < bv) return $scope.sortDesc ? 1 : -1
+            if (av > bv) return $scope.sortDesc ? -1 : 1
+            return 0
+        })
+        return files
+    }
+
+    $scope.toggleSortDirection = function () {
+        $scope.sortDesc = !$scope.sortDesc
     }
 
     $scope.open = function (file) {
@@ -116,7 +170,11 @@ app.controller('controller', ['$scope', 'FMService', '$interval', function ($sco
             $scope.newFolderName = ''
             $scope.createFolderErrorMessage = ''
         }catch (err) {
-            $scope.$apply(() => $scope.createFolderErrorMessage = err.data.message)
+            const msg = err?.data?.message || 'Failed to create folder'
+            if (err.status === 401) {
+                $rootScope.$broadcast('loginRequired')
+            }
+            $scope.$apply(() => $scope.createFolderErrorMessage = msg)
         }
     }
 
@@ -138,23 +196,41 @@ app.controller('controller', ['$scope', 'FMService', '$interval', function ($sco
     $scope.fileChanged = function (files) {
         angular.forEach(files, function (file) {
             $scope.progressbars.push({name: file.name, value: 0}); // Create new progress bar for each file
-            FMService.createFile($scope.directory.id, file, $scope.progressCallback).then(() => {
+            const dirId = $scope.directory.id || 'root'
+            FMService.createFile(dirId, file, $scope.progressCallback).then(() => {
                 $scope.load($scope.directory.id);
                 let progressBarIndex = $scope.progressbars.findIndex(bar => bar.name === file.name);
                 if (progressBarIndex !== -1) {
                     $scope.progressbars.splice(progressBarIndex, 1);
                 }
+                $scope.$apply(() => $scope.statusMessage = `Uploaded ${file.name}`)
             }).catch(err => {
+                if (err.status === 401) {
+                    $rootScope.$broadcast('loginRequired')
+                }
+                const msg = err?.data?.message || 'upload failed'
+                $scope.$apply(() => $scope.statusMessage = `${file.name}: ${msg}`)
                 $scope.progressCallback(file.name, `failed`)
             });
         });
     }
 
-    $scope.progressCallback = function (fileName, progress) {
-        let progressBar = $scope.progressbars.find(bar => bar.name === fileName);
-        if (progressBar) {
-            progressBar.value = progress;
+    $scope.onDrop = function (event) {
+        event.preventDefault()
+        $scope.$apply(() => $scope.isDragging = false)
+        if (event.dataTransfer && event.dataTransfer.files && event.dataTransfer.files.length > 0) {
+            $scope.fileChanged(event.dataTransfer.files)
         }
+    }
+
+    $scope.onDragOver = function (event) {
+        event.preventDefault()
+        $scope.$apply(() => $scope.isDragging = true)
+    }
+
+    $scope.onDragLeave = function (event) {
+        event.preventDefault()
+        $scope.$apply(() => $scope.isDragging = false)
     }
 
     $scope.rename = async function () {
@@ -193,10 +269,17 @@ app.controller('controller', ['$scope', 'FMService', '$interval', function ($sco
 }]);
 
 app.service('AuthService', ['$http', '$window', function ($http, $window) {
-    const token = $window.localStorage.getItem('auth_token');
-    if (token) {
-        $http.defaults.headers.common.Authorization = 'Bearer ' + token;
+    const setAuthHeader = function (token) {
+        if (token) {
+            $http.defaults.headers.common.Authorization = 'Bearer ' + token;
+        } else {
+            delete $http.defaults.headers.common.Authorization;
+        }
     }
+
+    const token = $window.localStorage.getItem('auth_token');
+    setAuthHeader(token)
+
     return {
         config: async function () {
             try {
@@ -211,13 +294,16 @@ app.service('AuthService', ['$http', '$window', function ($http, $window) {
                 username: username,
                 password: password
             });
-            const {data} = response.data
-            $window.localStorage.setItem('auth_token', data);
-            $http.defaults.headers.common.Authorization = 'Bearer ' + data;
+            const tokenData = response?.data?.data;
+            const token = typeof tokenData === 'string' ? tokenData : tokenData?.token;
+            if (!token) throw new Error('invalid login response')
+            $window.localStorage.setItem('auth_token', token);
+            setAuthHeader(token);
         },
-        logout: function () {
+        logout: function (reload = true) {
             $window.localStorage.removeItem('auth_token');
-            location.reload();
+            setAuthHeader(null);
+            if (reload) location.reload();
         },
         getToken: function () {
             return $window.localStorage.getItem('auth_token');
@@ -238,7 +324,7 @@ app.service('FMService', ['$http', function ($http) {
             const {data: {data: dir}} = await $http.get(endpoint)
             if (!dir.files) dir.files = []
             dir.files = dir.files.map(f => {
-                return {...f, size: f.dir ? 'folder' : humanReadableSize(f.size), selected: false}
+                return {...f, raw_size: f.size, size: f.dir ? 'folder' : humanReadableSize(f.size), selected: false}
             })
             return dir
         },
