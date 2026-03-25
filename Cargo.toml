@@ -7,6 +7,9 @@ edition = "2021"
 name = "ddrv"
 path = "src/main.rs"
 
+[features]
+vendored = ["openssl/vendored"]
+
 [dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -84,3 +87,6 @@ headers = "0.3"
 
 # Path utilities
 path-clean = "1"
+
+# OpenSSL (for cross-compilation)
+openssl = { version = "0.10", optional = true }
