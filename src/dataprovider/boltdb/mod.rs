@@ -47,6 +47,9 @@ fn encode_path(p: &str) -> String {
 }
 
 fn decode_path(id: &str) -> Result<String> {
+    if id == "root" {
+        return Ok(ROOT.to_string());
+    }
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(id)
         .map_err(|e| DataProviderError::Other(format!("base64 decode: {e}")))?;
@@ -88,16 +91,20 @@ fn is_direct_child(parent: &str, child: &str) -> bool {
 
 fn stored_to_file(path: &str, sf: &StoredFile) -> File {
     let pp = parent_of(path);
+    let parent_id = if path == ROOT {
+        None
+    } else if pp == ROOT {
+        Some("root".into())
+    } else {
+        Some(encode_path(pp))
+    };
+    let id = if path == ROOT { "root".into() } else { encode_path(path) };
     File {
-        id: encode_path(path),
+        id,
         name: sf.name.clone(),
         dir: sf.dir,
         size: sf.size,
-        parent: if path == ROOT {
-            None
-        } else {
-            Some(encode_path(pp))
-        },
+        parent: parent_id,
         mtime: sf.mtime,
     }
 }

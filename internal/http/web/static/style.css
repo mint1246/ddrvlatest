@@ -976,10 +976,14 @@ dialog {
   border: none;
   border-radius: var(--md-shape-xl);
   padding: 0;
+  position: fixed;
+  inset: 0;
+  margin: auto;
   background: var(--md-sys-color-surface-container-high);
   color: var(--md-sys-color-on-surface);
   box-shadow: var(--md-elevation-4);
   width: min(520px, calc(100vw - 32px));
+  max-height: calc(100dvh - 48px);
   max-width: 100%;
   overflow: hidden;
   animation: dialogIn var(--md-motion-dur-medium2) var(--md-motion-emphasized);
