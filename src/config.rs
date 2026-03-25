@@ -1,3 +1,4 @@
+use serde::de::Deserializer;
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize, Clone)]
@@ -11,7 +12,7 @@ pub struct Config {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct DdrvConfig {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_token_list")]
     pub token: Vec<String>,
     #[serde(default)]
     pub token_type: i32,
@@ -21,6 +22,52 @@ pub struct DdrvConfig {
     pub chunk_size: usize,
     #[serde(default)]
     pub nitro: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum TokenConfig {
+    Single(String),
+    Multiple(Vec<String>),
+}
+
+fn deserialize_token_list<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let token = Option::<TokenConfig>::deserialize(deserializer)?;
+    Ok(match token {
+        Some(TokenConfig::Single(v)) => vec![v],
+        Some(TokenConfig::Multiple(v)) => v,
+        None => Vec::new(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Config;
+
+    #[test]
+    fn token_accepts_single_string() {
+        let raw = r#"
+ddrv:
+  token: single-token
+  channels: ["123"]
+"#;
+        let cfg: Config = serde_yaml::from_str(raw).expect("config should parse");
+        assert_eq!(cfg.ddrv.token, vec!["single-token"]);
+    }
+
+    #[test]
+    fn token_accepts_sequence() {
+        let raw = r#"
+ddrv:
+  token: ["token-a", "token-b"]
+  channels: ["123"]
+"#;
+        let cfg: Config = serde_yaml::from_str(raw).expect("config should parse");
+        assert_eq!(cfg.ddrv.token, vec!["token-a", "token-b"]);
+    }
 }
 
 impl Default for DdrvConfig {
@@ -94,7 +141,7 @@ pub struct FrontendConfig {
 }
 
 pub fn load(config_path: Option<&str>) -> anyhow::Result<Config> {
-    use config::{Config as Cfg, Environment, File};
+    use config::{Config as Cfg, File};
 
     let home = std::env::var("HOME").unwrap_or_default();
 

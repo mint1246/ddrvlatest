@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use libunftp::auth::{AuthenticationError, Authenticator, Credentials, DefaultUser};
 use libunftp::storage::{Error, ErrorKind, Fileinfo, Metadata, Result, StorageBackend};
 use tokio::io::AsyncReadExt;
-use tracing::info;
+use tracing::{debug, error, info};
 
 use crate::dataprovider::types::DataProviderError;
 
@@ -164,11 +164,22 @@ impl StorageBackend<DefaultUser> for DdrvStorage {
     ) -> Result<u64> {
         let dp = crate::dataprovider::get();
         let path_s = Self::path_str(path);
+        info!(path = %path_s, async_write = self.async_write, "FTP upload started");
 
         // Ensure the file record exists
-        dp.touch(&path_s).await.map_err(dp_err)?;
-        let file = dp.stat(&path_s).await.map_err(dp_err)?;
-        dp.truncate(&file.id).await.map_err(dp_err)?;
+        dp.touch(&path_s).await.map_err(|e| {
+            error!(path = %path_s, error = %e, "FTP upload touch failed");
+            dp_err(e)
+        })?;
+        let file = dp.stat(&path_s).await.map_err(|e| {
+            error!(path = %path_s, error = %e, "FTP upload stat failed");
+            dp_err(e)
+        })?;
+        dp.truncate(&file.id).await.map_err(|e| {
+            error!(path = %path_s, file_id = %file.id, error = %e, "FTP upload truncate failed");
+            dp_err(e)
+        })?;
+        debug!(path = %path_s, file_id = %file.id, "FTP upload file prepared");
 
         let nodes = Arc::new(Mutex::new(Vec::<crate::ddrv::types::Node>::new()));
         let mut total: u64 = 0;
@@ -183,18 +194,27 @@ impl StorageBackend<DefaultUser> for DdrvStorage {
                 let n = input
                     .read(&mut buf)
                     .await
-                    .map_err(|e| Error::new(ErrorKind::LocalError, e))?;
+                    .map_err(|e| {
+                        error!(path = %path_s, bytes_written = total, error = %e, "FTP upload read failed");
+                        Error::new(ErrorKind::LocalError, e)
+                    })?;
                 if n == 0 {
                     break;
                 }
                 tokio::io::AsyncWriteExt::write_all(&mut writer, &buf[..n])
                     .await
-                    .map_err(|e| Error::new(ErrorKind::LocalError, e))?;
+                    .map_err(|e| {
+                        error!(path = %path_s, bytes_written = total, chunk_size = n, error = %e, "FTP upload write failed");
+                        Error::new(ErrorKind::LocalError, e)
+                    })?;
                 total += n as u64;
             }
             tokio::io::AsyncWriteExt::shutdown(&mut writer)
                 .await
-                .map_err(|e| Error::new(ErrorKind::LocalError, e))?;
+                .map_err(|e| {
+                    error!(path = %path_s, bytes_written = total, error = %e, "FTP upload writer shutdown failed");
+                    Error::new(ErrorKind::LocalError, e)
+                })?;
         } else {
             let nodes_cb = Arc::clone(&nodes);
             let mut writer = self.driver.new_writer(move |node| {
@@ -205,22 +225,49 @@ impl StorageBackend<DefaultUser> for DdrvStorage {
                 let n = input
                     .read(&mut buf)
                     .await
-                    .map_err(|e| Error::new(ErrorKind::LocalError, e))?;
+                    .map_err(|e| {
+                        error!(path = %path_s, bytes_written = total, error = %e, "FTP upload read failed");
+                        Error::new(ErrorKind::LocalError, e)
+                    })?;
                 if n == 0 {
                     break;
                 }
                 tokio::io::AsyncWriteExt::write_all(&mut writer, &buf[..n])
                     .await
-                    .map_err(|e| Error::new(ErrorKind::LocalError, e))?;
+                    .map_err(|e| {
+                        error!(path = %path_s, bytes_written = total, chunk_size = n, error = %e, "FTP upload write failed");
+                        Error::new(ErrorKind::LocalError, e)
+                    })?;
                 total += n as u64;
             }
             tokio::io::AsyncWriteExt::shutdown(&mut writer)
                 .await
-                .map_err(|e| Error::new(ErrorKind::LocalError, e))?;
+                .map_err(|e| {
+                    error!(path = %path_s, bytes_written = total, error = %e, "FTP upload writer shutdown failed");
+                    Error::new(ErrorKind::LocalError, e)
+                })?;
         }
 
         let final_nodes = nodes.lock().expect("nodes mutex poisoned").clone();
-        dp.create_nodes(&file.id, &final_nodes).await.map_err(dp_err)?;
+        dp.create_nodes(&file.id, &final_nodes).await.map_err(|e| {
+            error!(
+                path = %path_s,
+                file_id = %file.id,
+                bytes_written = total,
+                node_count = final_nodes.len(),
+                error = %e,
+                "FTP upload node persistence failed"
+            );
+            dp_err(e)
+        })?;
+
+        info!(
+            path = %path_s,
+            file_id = %file.id,
+            bytes_written = total,
+            node_count = final_nodes.len(),
+            "FTP upload completed"
+        );
 
         Ok(total)
     }
