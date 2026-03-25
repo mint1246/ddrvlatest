@@ -1,9 +1,9 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
 use serde::Deserialize;
-use tokio::sync::Mutex;
 use tracing::{debug, error, warn};
 use uuid::Uuid;
 
@@ -16,11 +16,6 @@ const USER_AGENT: &str = "PostmanRuntime/7.35.0";
 const REQ_TIMEOUT: Duration = Duration::from_secs(60);
 const MESSAGE_FILE_FORM_FIELD: &str = "files[0]";
 
-struct RestState {
-    last_token_idx: usize,
-    last_ch_idx: usize,
-}
-
 pub struct Rest {
     channels: Vec<String>,
     nitro: bool,
@@ -28,7 +23,8 @@ pub struct Rest {
     client: reqwest::Client,
     cdn_client: reqwest::Client,
     tokens: Vec<String>,
-    state: Arc<Mutex<RestState>>,
+    last_token_idx: AtomicUsize,
+    last_ch_idx: AtomicUsize,
     pub chunk_size: usize,
 }
 
@@ -52,10 +48,8 @@ impl Rest {
             nitro,
             limiter: Limiter::new(),
             tokens,
-            state: Arc::new(Mutex::new(RestState {
-                last_token_idx: 0,
-                last_ch_idx: 0,
-            })),
+            last_token_idx: AtomicUsize::new(0),
+            last_ch_idx: AtomicUsize::new(0),
             chunk_size,
         }
     }
@@ -64,18 +58,14 @@ impl Rest {
         self.channels.len()
     }
 
-    async fn token(&self) -> String {
-        let mut s = self.state.lock().await;
-        let t = self.tokens[s.last_token_idx].clone();
-        s.last_token_idx = (s.last_token_idx + 1) % self.tokens.len();
-        t
+    fn token(&self) -> &str {
+        let idx = self.last_token_idx.fetch_add(1, Ordering::Relaxed) % self.tokens.len();
+        &self.tokens[idx]
     }
 
-    async fn channel(&self) -> String {
-        let mut s = self.state.lock().await;
-        let c = self.channels[s.last_ch_idx].clone();
-        s.last_ch_idx = (s.last_ch_idx + 1) % self.channels.len();
-        c
+    fn channel(&self) -> &str {
+        let idx = self.last_ch_idx.fetch_add(1, Ordering::Relaxed) % self.channels.len();
+        &self.channels[idx]
     }
 
     /// Execute an API request with rate-limiting and optional retry on 429 / 5xx.
@@ -86,7 +76,7 @@ impl Rest {
     {
         let mut attempt: u32 = 1;
         loop {
-            let token = self.token().await;
+            let token = self.token();
             let bucket_id = format!("{}{}", token, path_suffix);
             debug!(
                 path_suffix,
@@ -97,9 +87,9 @@ impl Rest {
 
             self.limiter.acquire(&bucket_id).await;
 
-            let req = build(&self.client, &token)
+            let req = build(&self.client, token)
                 .header("User-Agent", USER_AGENT)
-                .header("Authorization", &token);
+                .header("Authorization", token);
 
             match req.send().await {
                 Ok(resp) => {
@@ -188,7 +178,7 @@ impl Rest {
     }
 
     async fn create_attachment_regular(&self, data: Bytes) -> Result<Node> {
-        let channel_id = self.channel().await;
+        let channel_id = self.channel();
         let path_suffix = format!("/{}/messages", channel_id);
         let url = format!("{}/channels/{}/messages", BASE_URL, channel_id);
         let upload_size = data.len();
@@ -199,9 +189,10 @@ impl Rest {
         );
 
         let fname = Uuid::new_v4().to_string();
+        let data_vec = data.to_vec();  // Convert once, not in the closure
         let resp = self
             .do_req(&path_suffix, move |c, _t| {
-                let part = reqwest::multipart::Part::bytes(data.to_vec())
+                let part = reqwest::multipart::Part::bytes(data_vec.clone())
                     .file_name(fname.clone())
                     .mime_str("application/octet-stream")
                     .expect("invalid mime type");
@@ -239,7 +230,7 @@ impl Rest {
 
     async fn create_attachment_nitro(&self, data: Bytes) -> Result<Node> {
         let fname = Uuid::new_v4().to_string();
-        let channel_id = self.channel().await;
+        let channel_id = self.channel();
         let path_suffix = format!("/{}/messages", channel_id);
         let upload_size = data.len();
         debug!(
