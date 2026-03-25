@@ -3,9 +3,11 @@ mod dataprovider;
 mod ddrv;
 mod ftp;
 mod http;
+mod migration;
 mod tracker;
 
 use clap::Parser;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
@@ -23,11 +25,30 @@ struct Args {
     /// Enable debug logging
     #[arg(long)]
     debug: bool,
+    /// Migrate a legacy master-branch BoltDB file in place and exit
+    #[arg(long)]
+    migrate: Option<PathBuf>,
+    /// Destination for migrated DB (defaults to <input>.migrated.redb)
+    #[arg(long)]
+    migrate_output: Option<PathBuf>,
+    /// Overwrite migration output if it already exists
+    #[arg(long, default_value_t = false)]
+    migrate_force: bool,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+
+    if let Some(input) = args.migrate.as_deref() {
+        let output = args
+            .migrate_output
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(format!("{}.migrated.redb", input.to_string_lossy())));
+        migration::migrate_legacy_boltdb(input, &output, args.migrate_force)?;
+        println!("migration completed: {}", output.display());
+        return Ok(());
+    }
 
     // Setup logging
     let filter = if args.debug { "debug" } else { "info" };
