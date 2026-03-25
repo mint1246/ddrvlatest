@@ -4,6 +4,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use serde::Deserialize;
 use tokio::sync::Mutex;
+use tracing::{debug, error, warn};
 use uuid::Uuid;
 
 use super::limiter::Limiter;
@@ -83,9 +84,16 @@ impl Rest {
     where
         F: Fn(&reqwest::Client, &str) -> reqwest::RequestBuilder,
     {
+        let mut attempt: u32 = 1;
         loop {
             let token = self.token().await;
             let bucket_id = format!("{}{}", token, path_suffix);
+            debug!(
+                path_suffix,
+                retry,
+                attempt,
+                "Discord API request attempt"
+            );
 
             self.limiter.acquire(&bucket_id).await;
 
@@ -97,13 +105,34 @@ impl Rest {
                 Ok(resp) => {
                     let status = resp.status().as_u16();
                     self.limiter.release(&bucket_id, Some(resp.headers())).await;
+                    debug!(
+                        path_suffix,
+                        retry,
+                        attempt,
+                        status,
+                        "Discord API response received"
+                    );
                     if retry && (status == 429 || status > 500) {
+                        warn!(
+                            path_suffix,
+                            attempt,
+                            status,
+                            "Discord API request will be retried"
+                        );
+                        attempt += 1;
                         continue;
                     }
                     return Ok(resp);
                 }
                 Err(e) => {
                     self.limiter.release(&bucket_id, None).await;
+                    error!(
+                        path_suffix,
+                        retry,
+                        attempt,
+                        error = %e,
+                        "Discord API request failed"
+                    );
                     return Err(DdrvError::Http(e));
                 }
             }
@@ -162,6 +191,12 @@ impl Rest {
         let channel_id = self.channel().await;
         let path_suffix = format!("/{}/messages", channel_id);
         let url = format!("{}/channels/{}/messages", BASE_URL, channel_id);
+        let upload_size = data.len();
+        debug!(
+            channel_id,
+            upload_size,
+            "Starting regular Discord attachment upload"
+        );
 
         let fname = Uuid::new_v4().to_string();
         let resp = self
@@ -179,6 +214,13 @@ impl Rest {
         let status = resp.status().as_u16();
         if !is_message_create_success(status) {
             let body = resp.text().await.unwrap_or_default();
+            error!(
+                channel_id,
+                upload_size,
+                status,
+                body,
+                "Regular Discord attachment upload failed"
+            );
             return Err(DdrvError::Other(format!(
                 "Discord API error: expected 200 or 201, got {}: {}",
                 status, body
@@ -186,6 +228,12 @@ impl Rest {
         }
 
         let msg: Message = resp.json().await?;
+        debug!(
+            channel_id,
+            upload_size,
+            message_id = %msg.id,
+            "Regular Discord attachment upload succeeded"
+        );
         node_from_message(msg)
     }
 
@@ -193,12 +241,18 @@ impl Rest {
         let fname = Uuid::new_v4().to_string();
         let channel_id = self.channel().await;
         let path_suffix = format!("/{}/messages", channel_id);
+        let upload_size = data.len();
+        debug!(
+            channel_id,
+            upload_size,
+            "Starting nitro Discord attachment upload"
+        );
 
         // Step 1 – request a pre-signed upload URL.
         let req_url = format!("{}/channels/{}/attachments", BASE_URL, channel_id);
         let body1 = format!(
             r#"{{"files":[{{"filename":"{}","file_size":{}}}]}}"#,
-            fname, data.len()
+            fname, upload_size
         );
 
         let resp = self
@@ -212,6 +266,13 @@ impl Rest {
         let status = resp.status().as_u16();
         if !is_message_create_success(status) {
             let body = resp.text().await.unwrap_or_default();
+            error!(
+                channel_id,
+                upload_size,
+                status,
+                body,
+                "Nitro upload pre-sign request failed"
+            );
             return Err(DdrvError::Other(format!(
                 "Discord API error: expected 200 or 201, got {}: {}",
                 status, body
@@ -244,6 +305,12 @@ impl Rest {
 
         if put_resp.status().as_u16() != 200 {
             let body = put_resp.text().await.unwrap_or_default();
+            error!(
+                channel_id,
+                upload_size,
+                body,
+                "Nitro upload PUT failed"
+            );
             return Err(DdrvError::Other(format!(
                 "nitro upload PUT failed: {}",
                 body
@@ -268,6 +335,13 @@ impl Rest {
         let status = resp.status().as_u16();
         if !is_message_create_success(status) {
             let body = resp.text().await.unwrap_or_default();
+            error!(
+                channel_id,
+                upload_size,
+                status,
+                body,
+                "Nitro upload final message create failed"
+            );
             return Err(DdrvError::Other(format!(
                 "Discord API error: expected 200 or 201, got {}: {}",
                 status, body
@@ -275,13 +349,27 @@ impl Rest {
         }
 
         let msg: Message = resp.json().await?;
+        debug!(
+            channel_id,
+            upload_size,
+            message_id = %msg.id,
+            "Nitro Discord attachment upload succeeded"
+        );
         node_from_message(msg)
     }
 
     /// Fetch a byte range from a Discord CDN attachment URL, returning the body as Bytes.
     pub async fn read_attachment(&self, node: &Node, start: usize, end: usize) -> Result<Bytes> {
         let url = encode_attachment_url(&node.url, node.ex, node.is, &node.hm);
+        let mut attempt: u32 = 1;
         loop {
+            debug!(
+                url = %node.url,
+                start,
+                end,
+                attempt,
+                "Reading Discord attachment range"
+            );
             let resp = self
                 .cdn_client
                 .get(&url)
@@ -293,10 +381,28 @@ impl Rest {
             let status = resp.status().as_u16();
             if status > 500 {
                 // Retry on Discord / Cloudflare 5xx errors.
+                warn!(
+                    url = %node.url,
+                    start,
+                    end,
+                    attempt,
+                    status,
+                    "Discord CDN request returned 5xx, retrying"
+                );
+                attempt += 1;
                 continue;
             }
             if status != 206 {
                 let body = resp.text().await.unwrap_or_default();
+                error!(
+                    url = %node.url,
+                    start,
+                    end,
+                    attempt,
+                    status,
+                    body,
+                    "Discord CDN request failed"
+                );
                 return Err(DdrvError::DiscordApi {
                     expected: 206,
                     got: status,
