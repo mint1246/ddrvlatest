@@ -23,6 +23,8 @@ USAGE
 -----
 - Build: `cargo build --release`
 - Run: `./target/release/ddrv --config=config.yaml`
+- Migrate old master BoltDB to rewrite redb with main binary:
+  `./target/release/ddrv --migrate /path/to/legacy.db --migrate-output /path/to/new.redb`
 
 USAGE DOCKER
 ------------
