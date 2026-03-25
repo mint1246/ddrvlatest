@@ -206,7 +206,7 @@ impl Rest {
                     .mime_str("application/octet-stream")
                     .expect("invalid mime type");
                 let form = reqwest::multipart::Form::new()
-                    .part(MESSAGE_FILE_FORM_FIELD.to_string(), part);
+                    .part(MESSAGE_FILE_FORM_FIELD, part);
                 c.post(&url).multipart(form)
             }, false)
             .await?;
