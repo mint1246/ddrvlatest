@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="48" y2="48" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#8B6DC0"/>
+      <stop offset="100%" stop-color="#4F378B"/>
+    </linearGradient>
+    <linearGradient id="arrow" x1="24" y1="28" x2="24" y2="38" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#EADDFF"/>
+      <stop offset="100%" stop-color="#CCC2DC"/>
+    </linearGradient>
+  </defs>
+  <!-- Rounded square background -->
+  <rect width="48" height="48" rx="12" fill="url(#bg)"/>
+  <!-- Cloud shape -->
+  <path d="M37 24.5a5.5 5.5 0 0 0-5.5-5.5c-.34 0-.67.03-.99.09A7.5 7.5 0 0 0 16.5 14 7.5 7.5 0 0 0 9 21.5c0 .18.01.35.02.53A5 5 0 0 0 10 32h22.5A4.5 4.5 0 0 0 37 27.5v-3z" fill="white" opacity="0.95"/>
+  <!-- Down arrow (storage indicator) -->
+  <path d="M24 29v9" stroke="url(#arrow)" stroke-width="2.2" stroke-linecap="round"/>
+  <path d="M20 34.5l4 4 4-4" stroke="url(#arrow)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

@@ -1,152 +1,347 @@
 <!DOCTYPE html>
-<html ng-app="application" lang="en">
+<html lang="en" data-theme="light">
 <head>
-    <title>DDrv - Infinite cloud storage using Discord</title>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>DDrv</title>
+  <meta name="description" content="Infinite cloud storage powered by Discord">
+  <meta name="theme-color" content="#6750A4" id="meta-theme-color">
+  <meta name="color-scheme" content="light dark">
 
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <!-- PWA -->
+  <link rel="manifest" href="/manifest.json">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="DDrv">
+  <link rel="apple-touch-icon" href="/icon-192.svg">
 
-    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
-    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
-    <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png">
-    <link rel="manifest" href="/site.webmanifest">
-    
-    <script src="https://ajax.googleapis.com/ajax/libs/angularjs/1.8.2/angular.min.js"></script>
-    <link rel="stylesheet" href="main.css">
+  <!-- Icons & Fonts -->
+  <link rel="icon" type="image/svg+xml" href="/logo.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css">
 </head>
-<body ng-controller="controller">
-<div id="app-shell" ng-class="{'dragging': isDragging}" ng-drop="onDrop($event)">
-<div id="header">
-    <div class="header-brand">
-        <h1 id="title">DDrv</h1>
-        <div class="subtitle">Discord as infinite cloud storage.</div>
-    </div>
-    <div ng-controller="authController">
-        <button onclick="loginDialog.showModal()" ng-show="config.anonymous && config.login && !authenticated" class="ghost-btn">
-            Login
+<body>
+
+<div id="app">
+  <div class="app-layout">
+
+    <!-- Navigation Rail (desktop only) -->
+    <nav id="nav-rail" aria-label="Main navigation">
+      <a class="app-bar-logo-wrap" href="#" aria-label="DDrv home">
+        <img src="/logo.svg" alt="DDrv logo" class="nav-rail-logo">
+      </a>
+      <button class="nav-rail-item active" id="nav-files">
+        <div class="indicator"><span class="material-symbols-outlined">cloud</span></div>
+        <span>Files</span>
+      </button>
+      <button class="nav-rail-item" id="nav-upload-rail">
+        <div class="indicator"><span class="material-symbols-outlined">upload</span></div>
+        <span>Upload</span>
+      </button>
+      <div style="flex:1"></div>
+      <button class="nav-rail-item" id="nav-theme-rail">
+        <div class="indicator"><span class="material-symbols-outlined" id="theme-icon-rail">dark_mode</span></div>
+        <span id="theme-label-rail">Dark</span>
+      </button>
+      <button class="nav-rail-item" id="nav-account-rail">
+        <div class="indicator"><span class="material-symbols-outlined">account_circle</span></div>
+        <span id="account-label-rail">Account</span>
+      </button>
+    </nav>
+
+    <div style="flex:1;display:flex;flex-direction:column;overflow:hidden;">
+
+      <!-- Top App Bar -->
+      <header id="top-app-bar">
+        <a class="app-bar-logo-wrap" href="#" aria-label="DDrv home">
+          <img src="/logo.svg" alt="">
+          <span class="app-bar-title">DDrv</span>
+        </a>
+
+        <div id="search-bar" role="search">
+          <span class="material-symbols-outlined" aria-hidden="true">search</span>
+          <input type="search" id="search-input" placeholder="Search files and folders…" autocomplete="off" spellcheck="false" aria-label="Search">
+          <button class="icon-btn" id="search-clear-btn" aria-label="Clear search" style="width:32px;height:32px;display:none">
+            <span class="material-symbols-outlined" style="font-size:18px">close</span>
+          </button>
+        </div>
+
+        <div class="app-bar-spacer"></div>
+
+        <button class="icon-btn" id="search-toggle-btn" aria-label="Search" title="Search">
+          <span class="material-symbols-outlined">search</span>
         </button>
-        <button ng-click="logout()" ng-show="authenticated" class="ghost-btn">
-            Logout
+        <button class="icon-btn" id="view-toggle-btn" aria-label="Toggle view" title="Toggle view">
+          <span class="material-symbols-outlined" id="view-icon">grid_view</span>
         </button>
-        <dialog id="loginDialog">
-            <h3>DDrv Login</h3>
-            <form ng-submit="login()" class="dialog-form">
-                <div class="dialog-fields">
-                    <label for="username">Username</label>
-                    <input type="text" id="username" ng-model="username" autocomplete="username">
-                    <label for="password">Password</label>
-                    <input type="password" id="password" ng-model="password" autocomplete="current-password">
-                </div>
-                <div class="dialog-actions">
-                    <button type="submit" ng-disabled="!username || !password">
-                        Login
-                    </button>
-                </div>
-            </form>
-            <div class="error-message" ng-if="loginErrMessage">{{loginErrMessage}}</div>
-        </dialog>
+        <button class="icon-btn" id="sort-btn" aria-label="Sort" title="Sort">
+          <span class="material-symbols-outlined">sort</span>
+        </button>
+        <button class="icon-btn" id="theme-toggle-btn" aria-label="Toggle theme" title="Toggle theme">
+          <span class="material-symbols-outlined" id="theme-icon">dark_mode</span>
+        </button>
+        <button class="icon-btn" id="account-btn" aria-label="Account" title="Account">
+          <span class="material-symbols-outlined">account_circle</span>
+        </button>
+      </header>
+
+      <main id="main-content">
+
+        <!-- Selection toolbar -->
+        <div id="selection-toolbar" class="hidden" role="toolbar">
+          <button class="icon-btn" id="clear-selection-btn" aria-label="Clear selection">
+            <span class="material-symbols-outlined">close</span>
+          </button>
+          <span id="selection-count" aria-live="polite">0 selected</span>
+          <div style="flex:1"></div>
+          <button class="icon-btn" id="copy-link-btn" aria-label="Copy link" title="Copy link">
+            <span class="material-symbols-outlined">link</span>
+          </button>
+          <button class="icon-btn" id="rename-btn" aria-label="Rename" title="Rename">
+            <span class="material-symbols-outlined">drive_file_rename_outline</span>
+          </button>
+          <button class="icon-btn danger" id="delete-btn" aria-label="Delete" title="Delete">
+            <span class="material-symbols-outlined">delete</span>
+          </button>
+        </div>
+
+        <!-- Mobile search -->
+        <div id="mobile-search-wrap" class="hidden">
+          <div class="search-field">
+            <span class="material-symbols-outlined" aria-hidden="true">search</span>
+            <input type="search" id="mobile-search-input" placeholder="Search…" autocomplete="off" aria-label="Search">
+          </div>
+        </div>
+
+        <div class="content-body">
+
+          <!-- Breadcrumb -->
+          <nav id="breadcrumb" aria-label="Breadcrumb"></nav>
+
+          <!-- Controls -->
+          <div id="controls-bar">
+            <button class="filter-chip active" data-sort="name">
+              <span class="material-symbols-outlined" style="font-size:16px">sort_by_alpha</span>
+              Name
+              <span class="material-symbols-outlined sort-dir-icon" style="font-size:14px">arrow_upward</span>
+            </button>
+            <button class="filter-chip" data-sort="size">
+              <span class="material-symbols-outlined" style="font-size:16px">data_usage</span>
+              Size
+            </button>
+            <button class="filter-chip" data-sort="mtime">
+              <span class="material-symbols-outlined" style="font-size:16px">schedule</span>
+              Modified
+            </button>
+            <div class="controls-spacer"></div>
+            <span id="item-count" style="font-size:12px;color:var(--md-sys-color-on-surface-variant);align-self:center"></span>
+          </div>
+
+          <!-- Loading -->
+          <div id="loading-state" class="loading-spinner">
+            <div class="spinner" role="status" aria-label="Loading"></div>
+          </div>
+
+          <!-- Files -->
+          <div id="files-container" class="hidden"></div>
+
+          <!-- Empty state -->
+          <div id="empty-state" class="hidden">
+            <div class="empty-icon-wrap">
+              <span class="material-symbols-outlined">folder_open</span>
+            </div>
+            <div class="empty-state-title">Nothing here yet</div>
+            <div class="empty-state-body">Upload files or create a folder to get started.</div>
+          </div>
+
+        </div>
+
+        <!-- Drop overlay -->
+        <div id="drop-overlay" class="hidden" aria-hidden="true">
+          <div class="drop-content">
+            <span class="material-symbols-outlined">cloud_upload</span>
+            <p>Drop files to upload</p>
+          </div>
+        </div>
+
+        <!-- Upload progress -->
+        <div id="upload-progress" class="hidden" aria-live="polite"></div>
+
+        <!-- Snackbar -->
+        <div id="snackbar" class="hidden" role="status" aria-live="polite"></div>
+
+        <!-- FAB -->
+        <div id="fab-container">
+          <button class="fab primary" id="upload-fab" aria-label="Upload file">
+            <span class="material-symbols-outlined">upload_file</span>
+            Upload
+          </button>
+          <button class="fab" id="create-folder-fab" aria-label="Create folder">
+            <span class="material-symbols-outlined">create_new_folder</span>
+            New Folder
+          </button>
+        </div>
+
+      </main>
     </div>
+  </div>
+
+  <!-- Bottom Nav (mobile) -->
+  <nav id="bottom-nav" aria-label="Bottom navigation">
+    <button class="bottom-nav-item active" id="bnav-files">
+      <div class="nav-indicator"><span class="material-symbols-outlined">cloud</span></div>
+      <span>Files</span>
+    </button>
+    <button class="bottom-nav-item" id="bnav-upload">
+      <div class="nav-indicator"><span class="material-symbols-outlined">upload</span></div>
+      <span>Upload</span>
+    </button>
+    <button class="bottom-nav-item" id="bnav-account">
+      <div class="nav-indicator"><span class="material-symbols-outlined">account_circle</span></div>
+      <span>Account</span>
+    </button>
+  </nav>
+
 </div>
 
-<dialog id="createFolderDialog">
-    <h3>Create Folder</h3>
-    <form ng-submit="createFolder()" class="dialog-form">
-        <label for="createFolderInput">Folder name</label>
-        <input type="text" id="createFolderInput" ng-model="newFolderName" required>
-        <button type="submit" ng-disabled="!newFolderName">
-            Create
-        </button>
-    </form>
-    <div class="error-message" ng-if="createFolderErrorMessage">{{createFolderErrorMessage}}</div>
+<!-- Hidden file input -->
+<input type="file" id="file-input" multiple hidden aria-hidden="true">
+
+<!-- ═══ Dialogs ════════════════════════════════════════════ -->
+
+<!-- Login Dialog -->
+<dialog id="login-dialog" aria-labelledby="login-title" aria-modal="true">
+  <div style="padding:28px 24px 0;">
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:6px;">
+      <img src="/logo.svg" alt="" style="width:36px;height:36px;">
+      <span id="login-title" style="font-size:22px;font-weight:700;color:var(--md-sys-color-on-surface)">Sign in to DDrv</span>
+    </div>
+    <p style="font-size:14px;color:var(--md-sys-color-on-surface-variant);margin-bottom:4px;">Enter your credentials to continue</p>
+  </div>
+  <form id="login-form" style="padding:8px 24px 0;">
+    <div class="text-field">
+      <label for="login-username">Username</label>
+      <input type="text" id="login-username" name="username" autocomplete="username" required>
+    </div>
+    <div class="text-field">
+      <label for="login-password">Password</label>
+      <input type="password" id="login-password" name="password" autocomplete="current-password" required>
+    </div>
+    <div id="login-error" class="field-error" aria-live="polite"></div>
+  </form>
+  <div class="dialog-actions">
+    <button class="btn-text" id="login-cancel-btn" type="button">Cancel</button>
+    <button class="btn-filled" id="login-submit-btn" type="button">Sign in</button>
+  </div>
 </dialog>
 
-<dialog id="renameDialog">
-    <h3>Rename</h3>
-    <form ng-submit="rename()" class="dialog-form">
-        <label for="renameFolderInput">New name</label>
-        <input type="text" id="renameFolderInput" ng-model="newName" required>
-        <button type="submit" ng-disabled="!newName">
-            Rename
-        </button>
-    </form>
-    <div class="error-message" ng-if="renameErrorMessage">{{renameErrorMessage}}</div>
+<!-- Create Folder Dialog -->
+<dialog id="create-folder-dialog" aria-labelledby="cf-title" aria-modal="true">
+  <div class="dialog-header">
+    <div class="dialog-icon"><span class="material-symbols-outlined">create_new_folder</span></div>
+    <div id="cf-title" class="dialog-title">New Folder</div>
+  </div>
+  <div class="dialog-body">
+    <div class="text-field">
+      <label for="folder-name-input">Folder name</label>
+      <input type="text" id="folder-name-input" autocomplete="off" placeholder="e.g. Documents">
+    </div>
+    <div id="cf-error" class="field-error" aria-live="polite"></div>
+  </div>
+  <div class="dialog-actions">
+    <button class="btn-text" id="cf-cancel-btn">Cancel</button>
+    <button class="btn-filled" id="cf-create-btn">Create</button>
+  </div>
 </dialog>
 
-<div ng-show="!appCrashed">
-    <div id="toolbar">
-        <div>
-            <button ng-click="load(directory.parent)" ng-show="directory.parent">
-                < Back
-            </button>
-        </div>
-        <div id="toolbar-edit">
-            <button onclick="createFolderDialog.showModal()" ng-show="btnCreateFolder" class="toolbar-btn">
-                Create Folder
-            </button>
-            <input type="file" id="fileUpload" style="display: none;"
-                    onchange="angular.element(this).scope().fileChanged(this.files)" multiple/>
-            <button ng-click="upload()" ng-show="btnUploadFile" class="toolbar-btn">
-                Upload File
-            </button>
+<!-- Rename Dialog -->
+<dialog id="rename-dialog" aria-labelledby="rename-title" aria-modal="true">
+  <div class="dialog-header">
+    <div class="dialog-icon"><span class="material-symbols-outlined">drive_file_rename_outline</span></div>
+    <div id="rename-title" class="dialog-title">Rename</div>
+  </div>
+  <div class="dialog-body">
+    <div class="text-field">
+      <label for="rename-input">New name</label>
+      <input type="text" id="rename-input" autocomplete="off">
+    </div>
+    <div id="rename-error" class="field-error" aria-live="polite"></div>
+  </div>
+  <div class="dialog-actions">
+    <button class="btn-text" id="rename-cancel-btn">Cancel</button>
+    <button class="btn-filled" id="rename-confirm-btn">Rename</button>
+  </div>
+</dialog>
 
-            <button ng-click="copyLink()" ng-show="btnCopyLink" class="toolbar-btn">
-                Copy Link
-            </button>
-            <button onclick="renameDialog.showModal()" ng-show="btnRename" class="toolbar-btn">
-                Rename
-            </button>
-            <button ng-click="delete()" ng-show="btnDelete" class="toolbar-btn danger-btn">
-                Delete
-            </button>
-        </div>
-    </div>
-    <div id="controls">
-        <input id="searchInput" type="search" ng-model="filterText" placeholder="Search files and folders">
-        <select ng-model="sortBy">
-            <option value="name">Sort: Name</option>
-            <option value="size">Sort: Size</option>
-            <option value="mtime">Sort: Modified</option>
-        </select>
-        <button type="button" ng-click="toggleSortDirection()">{{sortDesc ? 'Desc' : 'Asc'}}</button>
-    </div>
-    <div id="dropzone" ng-class="{'active': isDragging}"
-         ondragover="angular.element(this).scope().onDragOver(event)"
-         ondragleave="angular.element(this).scope().onDragLeave(event)"
-         ondrop="angular.element(this).scope().onDrop(event)">
-        Drag & drop files here to upload
-    </div>
-    <div class="status-message" ng-if="statusMessage">{{statusMessage}}</div>
-    <div>
-        <table>
-            <thead>
-            <tr>
-                <th>
-                    <input type="checkbox" ng-model="selectAllCheckbox" ng-change="selectAll(selectAllCheckbox)">
-                </th>
-                <th class="name-td">Name</th>
-                <th class="size-td">Size</th>
-                <th class="date-td">Modified</th>
-            </tr>
-            </thead>
-            <tbody>
-            <tr ng-repeat="file in filteredFiles()" ng-class="{'bold': file.dir, 'highlight': file.selected}">
-                <td>
-                    <input type="checkbox" ng-model="file.selected">
-                </td>
-                <td ng-click="file.dir ? load(file.id) : open(file)" class="name-td"> {{file.name}}</td>
-                <td style="text-align: right" class="size-td">{{file.size}}</td>
-                <td style="text-align: right" class="date-td">{{file.mtime | date:'MM/dd/yyyy hh:mma'}}</td>
-            </tr>
-            </tbody>
-        </table>
-    </div>
+<!-- Delete Confirmation Dialog -->
+<dialog id="delete-dialog" aria-labelledby="del-title" aria-modal="true">
+  <div class="dialog-header">
+    <div class="dialog-icon error"><span class="material-symbols-outlined">delete_forever</span></div>
+    <div id="del-title" class="dialog-title">Delete items?</div>
+  </div>
+  <div class="dialog-body">
+    <p id="del-body">Are you sure you want to delete the selected items? This cannot be undone.</p>
+  </div>
+  <div class="dialog-actions">
+    <button class="btn-text" id="del-cancel-btn">Cancel</button>
+    <button class="btn-filled error" id="del-confirm-btn">Delete</button>
+  </div>
+</dialog>
 
-    <div ng-repeat="progress in progressbars" class="progress-bar progress-bar-show-percent">
-        <div class="progress-bar-filled" ng-style="{'width': progress.value + '%'}"
-             data-filled="Uploading {{progress.name}} {{progress.value}} %"></div>
+<!-- Sort Menu -->
+<dialog id="sort-menu" aria-label="Sort options" aria-modal="true">
+  <div class="menu-label">Sort by</div>
+  <div class="menu-list">
+    <div class="menu-item" data-sort="name" tabindex="0" role="menuitem">
+      <span class="material-symbols-outlined">sort_by_alpha</span>Name
+      <span class="check-icon material-symbols-outlined hidden" data-check="name">check</span>
     </div>
+    <div class="menu-item" data-sort="size" tabindex="0" role="menuitem">
+      <span class="material-symbols-outlined">data_usage</span>Size
+      <span class="check-icon material-symbols-outlined hidden" data-check="size">check</span>
+    </div>
+    <div class="menu-item" data-sort="mtime" tabindex="0" role="menuitem">
+      <span class="material-symbols-outlined">schedule</span>Date modified
+      <span class="check-icon material-symbols-outlined hidden" data-check="mtime">check</span>
+    </div>
+  </div>
+  <div class="menu-divider"></div>
+  <div class="menu-label">Direction</div>
+  <div class="menu-list">
+    <div class="menu-item" data-dir="asc" tabindex="0" role="menuitem">
+      <span class="material-symbols-outlined">arrow_upward</span>Ascending
+      <span class="check-icon material-symbols-outlined" data-check-dir="asc">check</span>
+    </div>
+    <div class="menu-item" data-dir="desc" tabindex="0" role="menuitem">
+      <span class="material-symbols-outlined">arrow_downward</span>Descending
+      <span class="check-icon material-symbols-outlined hidden" data-check-dir="desc">check</span>
+    </div>
+  </div>
+</dialog>
 
-</div>
-<script src="main.js"></script>
-</div>
+<!-- Account Menu -->
+<dialog id="account-menu" aria-label="Account" aria-modal="true">
+  <div class="menu-list">
+    <div style="padding:16px;border-bottom:1px solid var(--md-sys-color-outline-variant);">
+      <div style="font-weight:600;font-size:15px;color:var(--md-sys-color-on-surface)" id="account-name-display">Not signed in</div>
+      <div style="font-size:12px;color:var(--md-sys-color-on-surface-variant)" id="account-status-display">Guest access</div>
+    </div>
+    <div class="menu-item hidden" id="account-login-item" tabindex="0" role="menuitem">
+      <span class="material-symbols-outlined">login</span>Sign in
+    </div>
+    <div class="menu-item hidden" id="account-logout-item" tabindex="0" role="menuitem">
+      <span class="material-symbols-outlined">logout</span>Sign out
+    </div>
+    <div class="menu-item" id="account-theme-item" tabindex="0" role="menuitem">
+      <span class="material-symbols-outlined" id="account-theme-icon">dark_mode</span>
+      <span id="account-theme-text">Switch to Dark mode</span>
+    </div>
+  </div>
+</dialog>
+
+<script src="/app.js"></script>
 </body>
 </html>
