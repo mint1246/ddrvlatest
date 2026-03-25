@@ -13,6 +13,7 @@ use super::utils::{decode_attachment_url, encode_attachment_url};
 const BASE_URL: &str = "https://discord.com/api/v10";
 const USER_AGENT: &str = "PostmanRuntime/7.35.0";
 const REQ_TIMEOUT: Duration = Duration::from_secs(60);
+const MESSAGE_FILE_FORM_FIELD: &str = "files[0]";
 
 struct RestState {
     last_token_idx: usize,
@@ -169,7 +170,8 @@ impl Rest {
                     .file_name(fname.clone())
                     .mime_str("application/octet-stream")
                     .expect("invalid mime type");
-                let form = reqwest::multipart::Form::new().part("files[0]".to_string(), part);
+                let form = reqwest::multipart::Form::new()
+                    .part(MESSAGE_FILE_FORM_FIELD.to_string(), part);
                 c.post(&url).multipart(form)
             }, false)
             .await?;
@@ -177,11 +179,10 @@ impl Rest {
         let status = resp.status().as_u16();
         if !is_message_create_success(status) {
             let body = resp.text().await.unwrap_or_default();
-            return Err(DdrvError::DiscordApi {
-                expected: 201,
-                got: status,
-                body,
-            });
+            return Err(DdrvError::Other(format!(
+                "Discord API error: expected 200 or 201, got {}: {}",
+                status, body
+            )));
         }
 
         let msg: Message = resp.json().await?;
@@ -211,11 +212,10 @@ impl Rest {
         let status = resp.status().as_u16();
         if !is_message_create_success(status) {
             let body = resp.text().await.unwrap_or_default();
-            return Err(DdrvError::DiscordApi {
-                expected: 201,
-                got: status,
-                body,
-            });
+            return Err(DdrvError::Other(format!(
+                "Discord API error: expected 200 or 201, got {}: {}",
+                status, body
+            )));
         }
 
         #[derive(Deserialize)]
@@ -268,11 +268,10 @@ impl Rest {
         let status = resp.status().as_u16();
         if !is_message_create_success(status) {
             let body = resp.text().await.unwrap_or_default();
-            return Err(DdrvError::DiscordApi {
-                expected: 201,
-                got: status,
-                body,
-            });
+            return Err(DdrvError::Other(format!(
+                "Discord API error: expected 200 or 201, got {}: {}",
+                status, body
+            )));
         }
 
         let msg: Message = resp.json().await?;
