@@ -937,8 +937,6 @@ document.addEventListener('DOMContentLoaded', () => {
   // ── Upload ────────────────────────────────────────────
   const fileInput = document.getElementById('file-input');
   document.getElementById('upload-fab')?.addEventListener('click', () => fileInput.click());
-  document.getElementById('nav-upload-rail')?.addEventListener('click', () => fileInput.click());
-  document.getElementById('bnav-upload')?.addEventListener('click', () => fileInput.click());
   fileInput?.addEventListener('change', () => {
     if (fileInput.files && fileInput.files.length > 0) {
       uploadFiles(Array.from(fileInput.files));
