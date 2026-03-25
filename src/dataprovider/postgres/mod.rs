@@ -254,6 +254,75 @@ impl DataProvider for PgProvider {
         Ok(nodes)
     }
 
+    async fn get_nodes_paged(
+        &self,
+        id: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<(Vec<Node>, usize, u64)> {
+        let uuid = parse_uuid(id)?;
+
+        // Read all persisted nodes to determine the total count and compute the
+        // cumulative byte offset at the start of the requested page.  Only the
+        // node metadata (URL, size, timestamps) is read – actual file bytes are
+        // never loaded here.  Node counts in practice are small (typically < 100
+        // even for multi-GB files at 25 MB/chunk), so this is not a concern.
+        let rows = sqlx::query(
+            r#"SELECT id, url, size, "start", "end", mid, ex, "is", hm
+               FROM node WHERE file = $1 ORDER BY id"#,
+        )
+        .bind(uuid)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx_err)?;
+
+        let all_nodes: Vec<Node> = rows.iter().map(row_to_node).collect::<Result<Vec<_>>>()?;
+        let total = all_nodes.len();
+
+        // Compute the cumulative byte offset at the start of the requested page.
+        let byte_offset: u64 = all_nodes
+            .iter()
+            .take(offset)
+            .map(|n| n.size as u64)
+            .sum();
+
+        if offset >= total || limit == 0 {
+            return Ok((Vec::new(), total, byte_offset));
+        }
+
+        let end = (offset + limit).min(total);
+        let mut page: Vec<Node> = all_nodes[offset..end].to_vec();
+
+        // Refresh only the nodes in the requested page to limit Discord API calls.
+        if crate::dataprovider::nodes_need_refresh(&page) {
+            self.driver
+                .update_nodes(&mut page)
+                .await
+                .map_err(|e| DataProviderError::Other(e.to_string()))?;
+
+            // Persist refreshed URL/expiry data for the page nodes only.
+            let mut qb: QueryBuilder<Postgres> = QueryBuilder::new(
+                r#"UPDATE node AS n
+                   SET url = v.url, ex = v.ex, "is" = v.is, hm = v.hm
+                   FROM ("#,
+            );
+            qb.push_values(page.iter(), |mut b, n| {
+                b.push_bind(n.nid)
+                    .push_bind(&n.url)
+                    .push_bind(n.ex)
+                    .push_bind(n.is)
+                    .push_bind(&n.hm);
+            });
+            qb.push(
+                r#") AS v(id, url, ex, "is", hm)
+                      WHERE n.id = v.id"#,
+            );
+            qb.build().execute(&self.pool).await.map_err(map_sqlx_err)?;
+        }
+
+        Ok((page, total, byte_offset))
+    }
+
     async fn create_nodes(&self, id: &str, nodes: &[Node]) -> Result<()> {
         if nodes.is_empty() {
             return Ok(());

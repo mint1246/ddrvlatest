@@ -63,6 +63,19 @@ pub trait DataProvider: Send + Sync + 'static {
     /// Get Discord attachment nodes for a file
     async fn get_nodes(&self, id: &str) -> Result<Vec<Node>>;
 
+    /// Get a paginated slice of nodes for a file, refreshing only the URLs in the
+    /// requested range to avoid hammering the Discord API with large files.
+    ///
+    /// Returns `(page_nodes, total_chunk_count, byte_offset_of_first_page_node)`.
+    /// - `offset` is the zero-based index of the first chunk in the page.
+    /// - `limit` is the maximum number of chunks to return.
+    async fn get_nodes_paged(
+        &self,
+        id: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<(Vec<Node>, usize, u64)>;
+
     /// Persist Discord attachment nodes for a file
     async fn create_nodes(&self, id: &str, nodes: &[Node]) -> Result<()>;
 

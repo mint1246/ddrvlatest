@@ -173,6 +173,8 @@ pub struct FileManifest {
     pub name: String,
     pub size: i64,
     pub mime: String,
+    /// Total number of chunks the file is split into across all pages.
+    pub total_chunks: usize,
     pub chunks: Vec<ChunkInfo>,
 }
 
@@ -186,26 +188,36 @@ pub struct DownloadQuery {
     pub direct: Option<String>,
 }
 
+/// Query params for the manifest endpoint.
+#[derive(Deserialize, Default)]
+pub struct ManifestQuery {
+    /// Zero-based index of the first chunk to include (default: 0).
+    pub offset: Option<usize>,
+    /// Maximum number of chunks to return per request (default: all).
+    /// Keeping this small limits the number of Discord API URL-refresh calls made
+    /// per request, which reduces rate-limiting pressure on large files.
+    pub limit: Option<usize>,
+}
+
 /// GET /files/:id/manifest  (no auth)
 ///
-/// Returns a JSON manifest listing every authenticated Discord CDN chunk URL
-/// and its byte-range metadata.  Clients can use this to download all chunks
-/// directly from Discord CDN and reassemble the file locally, removing the
-/// server as a bandwidth bottleneck entirely.
+/// Returns a JSON manifest listing authenticated Discord CDN chunk URLs with
+/// byte-range metadata.  Clients use this to download chunks directly from
+/// Discord CDN and reassemble the file locally (client-side reconstruction),
+/// removing the server as a bandwidth bottleneck.
+///
+/// Supports pagination via `?offset=N&limit=K` to spread URL-refresh calls
+/// across multiple requests and avoid Discord API rate limits for large files.
 pub async fn manifest_file_handler(
     State(_state): State<AppState>,
     Path(id): Path<String>,
+    Query(query): Query<ManifestQuery>,
 ) -> Response {
     let dp = dataprovider::get();
 
     let file = match dp.get_by_id(&id, None).await {
         Ok(f) => f,
         Err(DataProviderError::NotFound) => return err(StatusCode::NOT_FOUND, "not found"),
-        Err(e) => return dp_err(e),
-    };
-
-    let nodes = match dp.get_nodes(&id).await {
-        Ok(n) => n,
         Err(e) => return dp_err(e),
     };
 
@@ -217,17 +229,45 @@ pub async fn manifest_file_handler(
         .first_or_octet_stream()
         .to_string();
 
-    // Build absolute byte offsets for each chunk.
+    let offset = query.offset.unwrap_or(0);
+
+    let (page_nodes, total_chunks, byte_offset) = if let Some(limit) = query.limit {
+        // Paginated: only refresh nodes in the requested range.
+        match dp.get_nodes_paged(&id, offset, limit).await {
+            Ok(result) => result,
+            Err(e) => return dp_err(e),
+        }
+    } else {
+        // Unpaginated: fetch and refresh all nodes, then slice from offset.
+        let all_nodes = match dp.get_nodes(&id).await {
+            Ok(n) => n,
+            Err(e) => return dp_err(e),
+        };
+        let total = all_nodes.len();
+        let byte_offset: u64 = all_nodes
+            .iter()
+            .take(offset)
+            .map(|n| n.size as u64)
+            .sum();
+        let page = if offset < total {
+            all_nodes[offset..].to_vec()
+        } else {
+            Vec::new()
+        };
+        (page, total, byte_offset)
+    };
+
+    // Build ChunkInfo entries, computing absolute byte offsets from byte_offset.
     // This mirrors the offset arithmetic in `ddrv::reader::Reader::new` so that
-    // clients can use `Range: bytes={start}-{end}` when fetching each chunk URL.
-    let mut offset: u64 = 0;
-    let chunks: Vec<ChunkInfo> = nodes
+    // clients can use `Range: bytes={start}-{end}` when fetching individual chunks.
+    let mut running_offset = byte_offset;
+    let chunks: Vec<ChunkInfo> = page_nodes
         .iter()
         .map(|n| {
-            let start = offset;
+            let start = running_offset;
             let size = n.size as u64;
-            let end = offset + size - 1;
-            offset = end + 1;
+            let end = running_offset + size - 1;
+            running_offset = end + 1;
             ChunkInfo {
                 url: encode_attachment_url(&n.url, n.ex, n.is, &n.hm),
                 start,
@@ -242,6 +282,7 @@ pub async fn manifest_file_handler(
         name: file.name.clone(),
         size: file.size,
         mime,
+        total_chunks,
         chunks,
     };
 

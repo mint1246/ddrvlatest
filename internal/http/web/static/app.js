@@ -493,8 +493,125 @@ async function navigateTo(id, crumbIndex = null) {
 }
 
 function openFile(file) {
-  const url = '/files/' + file.id + '/' + encodeURIComponent(file.name);
-  window.open(url, '_blank');
+  downloadFile(file);
+}
+
+/* ══════════════════════════════════════════════════════════
+   Client-side file download via manifest
+   Chunks are fetched directly from Discord CDN in batches.
+   The server is only used to look up metadata and refresh
+   expiring CDN URLs – it never proxies the file bytes.
+═══════════════════════════════════════════════════════════ */
+
+// How many chunk URLs to request per manifest call.  Keeping this small means
+// only a few Discord URLs need refreshing per request, avoiding rate limiting.
+const MANIFEST_BATCH = 5;
+
+// How long (ms) to keep the Blob URL alive after triggering the Save dialog.
+// The browser's download manager needs time to start reading the URL before
+// it can be revoked; 30 s is ample even on slow devices.
+const BLOB_URL_REVOKE_DELAY_MS = 30000;
+
+async function downloadFile(file) {
+  // For directories there is nothing to download.
+  if (file.dir) return;
+
+  const progressContainer = document.getElementById('upload-progress');
+  const cardId = 'dl-' + file.id;
+
+  // Build a download-progress card reusing the upload-card styles.
+  const card = document.createElement('div');
+  card.className = 'upload-card';
+  card.id = cardId;
+  card.innerHTML =
+    '<div class="upload-header">' +
+      '<div class="upload-filename">' + escHtml(file.name) + '</div>' +
+      '<div class="upload-pct">0%</div>' +
+    '</div>' +
+    '<div class="progress-track"><div class="progress-fill" style="width:0%"></div></div>';
+  progressContainer.classList.remove('hidden');
+  progressContainer.appendChild(card);
+
+  const pctEl  = card.querySelector('.upload-pct');
+  const fillEl = card.querySelector('.progress-fill');
+
+  function setProgress(pct) {
+    if (pctEl)  pctEl.textContent  = Math.round(pct) + '%';
+    if (fillEl) fillEl.style.width = Math.round(pct) + '%';
+  }
+
+  try {
+    const buffers = [];
+    let offset       = 0;
+    let totalChunks  = null;
+    // Track how many individual chunks have completed so progress is smooth.
+    let doneChunks   = 0;
+    let lastName     = file.name;
+    let lastMime     = 'application/octet-stream';
+
+    // Fetch chunk URLs in batches to limit Discord URL-refresh API calls.
+    do {
+      const manifestUrl =
+        '/files/' + file.id + '/manifest' +
+        '?offset=' + offset + '&limit=' + MANIFEST_BATCH;
+      const res = await fetch(manifestUrl);
+      if (!res.ok) throw new Error('Manifest request failed: ' + res.status);
+
+      const manifest = await res.json();
+      if (totalChunks === null) {
+        totalChunks = manifest.total_chunks;
+        lastName    = manifest.name || file.name;
+        lastMime    = manifest.mime || 'application/octet-stream';
+      }
+
+      // Download each chunk in this batch directly from Discord CDN in parallel.
+      // Update progress as each individual chunk completes for a smooth bar.
+      const chunkBuffers = await Promise.all(
+        manifest.chunks.map(function(chunk) {
+          return fetch(chunk.url).then(function(r) {
+            if (!r.ok) throw new Error('Chunk fetch failed: ' + r.status);
+            return r.arrayBuffer();
+          }).then(function(buf) {
+            doneChunks++;
+            setProgress(totalChunks > 0 ? (doneChunks / totalChunks) * 100 : 0);
+            return buf;
+          });
+        })
+      );
+
+      buffers.push.apply(buffers, chunkBuffers);
+      offset += manifest.chunks.length;
+    } while (offset < totalChunks);
+
+    setProgress(100);
+
+    // Reconstruct the file as a Blob and trigger the browser's Save dialog with
+    // the correct filename (not the UUID used internally on Discord CDN).
+    const blob    = new Blob(buffers, { type: lastMime });
+    const blobUrl = URL.createObjectURL(blob);
+    const a       = document.createElement('a');
+    a.href        = blobUrl;
+    a.download    = lastName;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function() { URL.revokeObjectURL(blobUrl); }, BLOB_URL_REVOKE_DELAY_MS);
+
+    setTimeout(function() { card.remove(); }, 1500);
+    if (progressContainer.children.length === 0) {
+      progressContainer.classList.add('hidden');
+    }
+  } catch (err) {
+    if (fillEl) fillEl.classList.add('failed');
+    if (pctEl)  pctEl.textContent = 'Failed';
+    showSnack('Download failed: ' + err.message, 'error');
+    setTimeout(function() {
+      card.remove();
+      if (progressContainer.children.length === 0) {
+        progressContainer.classList.add('hidden');
+      }
+    }, 4000);
+  }
 }
 
 /* ══════════════════════════════════════════════════════════
