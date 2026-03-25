@@ -399,6 +399,18 @@ pub fn migrate_legacy_boltdb(input: &Path, output: &Path, force: bool) -> Result
         }
     }
 
+    let input_meta =
+        fs::metadata(input).with_context(|| format!("read input file metadata {}", input.display()))?;
+    if input_meta.len() == 0 {
+        return write_redb_from_export(
+            output,
+            LegacyExport {
+                files: Vec::new(),
+                nodes: Vec::new(),
+            },
+        );
+    }
+
     let export = run_go_exporter(input)?;
     write_redb_from_export(output, export)
 }
@@ -479,5 +491,28 @@ mod tests {
         assert_eq!(node_data.size, 10);
 
         fs::remove_file(out).ok();
+    }
+
+    #[test]
+    fn migrates_zero_length_legacy_db_without_exporter() {
+        let input = temp_file("ddrv-migrate-empty-in");
+        let output = temp_file("ddrv-migrate-empty-out");
+        fs::write(&input, []).expect("create zero-length legacy db file");
+
+        migrate_legacy_boltdb(&input, &output, true).expect("zero-length migration should succeed");
+
+        let db = Database::open(&output).expect("open output redb");
+        let tx = db.begin_read().expect("begin read");
+        let fs_table = tx.open_table(FS_TABLE).expect("open fs table");
+
+        let root = fs_table
+            .get("/")
+            .expect("read root")
+            .expect("root should exist");
+        let root_file: StoredFile = bincode::deserialize(root.value()).expect("decode root");
+        assert!(root_file.dir);
+
+        fs::remove_file(input).ok();
+        fs::remove_file(output).ok();
     }
 }
