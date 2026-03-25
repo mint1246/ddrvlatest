@@ -399,8 +399,8 @@ pub fn migrate_legacy_boltdb(input: &Path, output: &Path, force: bool) -> Result
         }
     }
 
-    let input_meta =
-        fs::metadata(input).with_context(|| format!("read input file metadata {}", input.display()))?;
+    let input_meta = fs::metadata(input)
+        .with_context(|| format!("failed to read input file metadata: {}", input.display()))?;
     if input_meta.len() == 0 {
         return write_redb_from_export(
             output,
