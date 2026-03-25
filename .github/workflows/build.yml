@@ -48,8 +48,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-${{ matrix.target }}-cargo-
+                    key: ${{ runner.os }}-${{ matrix.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+                    restore-keys: ${{ runner.os }}-${{ matrix.os }}-${{ matrix.target }}-cargo-
 
       - name: Build release binary (aarch64)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
