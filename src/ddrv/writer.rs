@@ -46,10 +46,7 @@ impl Writer {
     /// Poll any in-flight upload to completion, calling `on_chunk` on success.
     /// Returns `Poll::Pending` if still uploading, `Poll::Ready(Err)` on failure,
     /// or `Poll::Ready(Ok(()))` when done.
-    fn poll_pending(
-        this: &mut Self,
-        cx: &mut Context<'_>,
-    ) -> Poll<io::Result<()>> {
+    fn poll_pending(this: &mut Self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         if let Some(handle) = this.pending.as_mut() {
             match Pin::new(handle).poll(cx) {
                 Poll::Pending => return Poll::Pending,
@@ -67,7 +64,9 @@ impl Writer {
     fn start_upload(&mut self) {
         let data = Bytes::from(std::mem::take(&mut self.buf));
         let rest = Arc::clone(&self.rest);
-        self.pending = Some(tokio::spawn(async move { rest.create_attachment(data).await }));
+        self.pending = Some(tokio::spawn(
+            async move { rest.create_attachment(data).await },
+        ));
     }
 }
 
@@ -124,10 +123,7 @@ impl AsyncWrite for Writer {
         Poll::Ready(Ok(()))
     }
 
-    fn poll_shutdown(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<io::Result<()>> {
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.as_mut().get_mut();
 
         if this.closed {
@@ -161,7 +157,9 @@ impl AsyncWrite for Writer {
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
-fn flatten_join(res: std::result::Result<Result<Node>, tokio::task::JoinError>) -> io::Result<Node> {
+fn flatten_join(
+    res: std::result::Result<Result<Node>, tokio::task::JoinError>,
+) -> io::Result<Node> {
     match res {
         Ok(Ok(node)) => Ok(node),
         Ok(Err(e)) => Err(io::Error::new(io::ErrorKind::Other, e.to_string())),
