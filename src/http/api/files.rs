@@ -9,9 +9,7 @@ use std::sync::{Arc, Mutex};
 use tokio_util::io::ReaderStream;
 
 use super::types::{err, ApiResponse, UpdateFileRequest};
-use crate::{
-    dataprovider, dataprovider::types::DataProviderError, ddrv::types::Node, http::AppState,
-};
+use crate::{dataprovider, dataprovider::types::DataProviderError, ddrv::types::Node, http::AppState};
 
 fn dp_err(e: DataProviderError) -> Response {
     match e {
@@ -144,11 +142,7 @@ pub async fn delete_file_handler(
 ) -> Response {
     let dp = dataprovider::get();
     match dp.delete(&id, Some(&dir_id)).await {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(serde_json::json!({"message": "file deleted"})),
-        )
-            .into_response(),
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"message": "file deleted"}))).into_response(),
         Err(e) => dp_err(e),
     }
 }
@@ -274,10 +268,7 @@ struct LimitedReader<R> {
 
 impl<R> LimitedReader<R> {
     fn new(inner: R, limit: usize) -> Self {
-        LimitedReader {
-            inner,
-            remaining: limit,
-        }
+        LimitedReader { inner, remaining: limit }
     }
 }
 

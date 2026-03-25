@@ -542,8 +542,7 @@ mod tests {
         let input = temp_file("ddrv-migrate-ro-in");
         fs::write(&input, b"legacy-data").expect("create source db fixture");
 
-        let workdir =
-            std::env::temp_dir().join(format!("ddrv-migrate-work-{}", uuid::Uuid::new_v4()));
+        let workdir = std::env::temp_dir().join(format!("ddrv-migrate-work-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&workdir).expect("create workdir");
 
         let mut perms = fs::metadata(&input).expect("stat input").permissions();

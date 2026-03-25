@@ -147,7 +147,9 @@ pub fn load(config_path: Option<&str>) -> anyhow::Result<Config> {
 
     let mut builder = Cfg::builder()
         .add_source(File::with_name("config").required(false))
-        .add_source(File::with_name(&format!("{}/.config/ddrv/config", home)).required(false));
+        .add_source(
+            File::with_name(&format!("{}/.config/ddrv/config", home)).required(false),
+        );
 
     if let Some(path) = config_path {
         builder = builder.add_source(File::with_name(path).required(true));

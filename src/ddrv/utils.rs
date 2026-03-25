@@ -6,8 +6,9 @@ use reqwest::Url;
 static DISCORD_CDN_RE: OnceLock<Regex> = OnceLock::new();
 
 fn cdn_re() -> &'static Regex {
-    DISCORD_CDN_RE
-        .get_or_init(|| Regex::new(r"https://cdn\.discordapp\.com/attachments/(\d+)/").unwrap())
+    DISCORD_CDN_RE.get_or_init(|| {
+        Regex::new(r"https://cdn\.discordapp\.com/attachments/(\d+)/").unwrap()
+    })
 }
 
 /// Parses a full Discord CDN attachment URL (with `ex`, `is`, `hm` query params) and

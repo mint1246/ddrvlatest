@@ -23,7 +23,10 @@ fn validate_name(name: &str) -> bool {
 }
 
 /// GET /api/directories/:id   (or GET /api/directories with no id)
-pub async fn get_dir_handler(State(_state): State<AppState>, id: Option<Path<String>>) -> Response {
+pub async fn get_dir_handler(
+    State(_state): State<AppState>,
+    id: Option<Path<String>>,
+) -> Response {
     let dp = dataprovider::get();
     let dir_id = id.as_ref().map(|p| p.0.as_str()).unwrap_or("root");
 
@@ -98,11 +101,7 @@ pub async fn delete_dir_handler(
 ) -> Response {
     let dp = dataprovider::get();
     match dp.delete(&id, None).await {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(serde_json::json!({"message":"deleted"})),
-        )
-            .into_response(),
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"message":"deleted"}))).into_response(),
         Err(e) => dp_err(e),
     }
 }
