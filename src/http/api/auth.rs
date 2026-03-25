@@ -14,7 +14,8 @@ use crate::http::AppState;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
-    date: i64,
+    iat: i64,
+    exp: i64,
 }
 
 fn signing_key(cfg: &crate::config::HttpConfig) -> String {
@@ -31,7 +32,8 @@ pub async fn login_handler(
     }
 
     let claims = Claims {
-        date: Utc::now().timestamp_millis(),
+        iat: Utc::now().timestamp(),
+        exp: (Utc::now() + chrono::Duration::days(30)).timestamp(),
     };
     let key = signing_key(cfg);
     match encode(
@@ -100,5 +102,41 @@ pub async fn auth_middleware(
     ) {
         Ok(_) => next.run(request).await,
         Err(_) => err(StatusCode::UNAUTHORIZED, "invalid token"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{signing_key, Claims};
+    use crate::config::HttpConfig;
+    use chrono::Utc;
+    use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
+
+    #[test]
+    fn generated_claims_validate_with_default_validation() {
+        let cfg = HttpConfig {
+            username: "user".into(),
+            password: "pass".into(),
+            ..Default::default()
+        };
+        let key = signing_key(&cfg);
+        let claims = Claims {
+            iat: Utc::now().timestamp(),
+            exp: (Utc::now() + chrono::Duration::minutes(5)).timestamp(),
+        };
+
+        let token = encode(
+            &Header::default(),
+            &claims,
+            &EncodingKey::from_secret(key.as_bytes()),
+        )
+        .expect("token should encode");
+
+        decode::<Claims>(
+            &token,
+            &DecodingKey::from_secret(key.as_bytes()),
+            &Validation::default(),
+        )
+        .expect("token should validate");
     }
 }

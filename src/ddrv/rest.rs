@@ -163,24 +163,22 @@ impl Rest {
         let url = format!("{}/channels/{}/messages", BASE_URL, channel_id);
 
         let fname = Uuid::new_v4().to_string();
-        let data_len = data.len();
-
         let resp = self
             .do_req(&path_suffix, move |c, _t| {
                 let part = reqwest::multipart::Part::bytes(data.to_vec())
                     .file_name(fname.clone())
                     .mime_str("application/octet-stream")
                     .expect("invalid mime type");
-                let form = reqwest::multipart::Form::new().part(fname.clone(), part);
+                let form = reqwest::multipart::Form::new().part("files[0]".to_string(), part);
                 c.post(&url).multipart(form)
             }, false)
             .await?;
 
         let status = resp.status().as_u16();
-        if status != 200 {
+        if !is_message_create_success(status) {
             let body = resp.text().await.unwrap_or_default();
             return Err(DdrvError::DiscordApi {
-                expected: 200,
+                expected: 201,
                 got: status,
                 body,
             });
@@ -199,7 +197,7 @@ impl Rest {
         let req_url = format!("{}/channels/{}/attachments", BASE_URL, channel_id);
         let body1 = format!(
             r#"{{"files":[{{"filename":"{}","file_size":{}}}]}}"#,
-            fname, self.chunk_size
+            fname, data.len()
         );
 
         let resp = self
@@ -211,10 +209,10 @@ impl Rest {
             .await?;
 
         let status = resp.status().as_u16();
-        if status != 200 {
+        if !is_message_create_success(status) {
             let body = resp.text().await.unwrap_or_default();
             return Err(DdrvError::DiscordApi {
-                expected: 200,
+                expected: 201,
                 got: status,
                 body,
             });
@@ -268,10 +266,10 @@ impl Rest {
             .await?;
 
         let status = resp.status().as_u16();
-        if status != 200 {
+        if !is_message_create_success(status) {
             let body = resp.text().await.unwrap_or_default();
             return Err(DdrvError::DiscordApi {
-                expected: 200,
+                expected: 201,
                 got: status,
                 body,
             });
@@ -330,4 +328,21 @@ fn node_from_message(msg: Message) -> Result<Node> {
         hm,
         ..Default::default()
     })
+}
+
+fn is_message_create_success(status: u16) -> bool {
+    matches!(status, 200 | 201)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_message_create_success;
+
+    #[test]
+    fn message_create_success_statuses_are_accepted() {
+        assert!(is_message_create_success(200));
+        assert!(is_message_create_success(201));
+        assert!(!is_message_create_success(204));
+        assert!(!is_message_create_success(400));
+    }
 }
