@@ -101,9 +101,7 @@ impl Limiter {
         let reset = headers
             .get("X-RateLimit-Reset")
             .and_then(|v| v.to_str().ok());
-        let retry_after = headers
-            .get("Retry-After")
-            .and_then(|v| v.to_str().ok());
+        let retry_after = headers.get("Retry-After").and_then(|v| v.to_str().ok());
 
         if let Some(ra) = retry_after {
             if let Ok(secs) = ra.parse::<u64>() {
