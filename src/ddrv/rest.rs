@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -29,12 +29,7 @@ pub struct Rest {
 }
 
 impl Rest {
-    pub fn new(
-        tokens: Vec<String>,
-        channels: Vec<String>,
-        chunk_size: usize,
-        nitro: bool,
-    ) -> Self {
+    pub fn new(tokens: Vec<String>, channels: Vec<String>, chunk_size: usize, nitro: bool) -> Self {
         Rest {
             client: reqwest::Client::builder()
                 .timeout(REQ_TIMEOUT)
@@ -78,12 +73,7 @@ impl Rest {
         loop {
             let token = self.token();
             let bucket_id = format!("{}{}", token, path_suffix);
-            debug!(
-                path_suffix,
-                retry,
-                attempt,
-                "Discord API request attempt"
-            );
+            debug!(path_suffix, retry, attempt, "Discord API request attempt");
 
             self.limiter.acquire(&bucket_id).await;
 
@@ -97,17 +87,12 @@ impl Rest {
                     self.limiter.release(&bucket_id, Some(resp.headers())).await;
                     debug!(
                         path_suffix,
-                        retry,
-                        attempt,
-                        status,
-                        "Discord API response received"
+                        retry, attempt, status, "Discord API response received"
                     );
                     if retry && (status == 429 || status > 500) {
                         warn!(
                             path_suffix,
-                            attempt,
-                            status,
-                            "Discord API request will be retried"
+                            attempt, status, "Discord API request will be retried"
                         );
                         attempt += 1;
                         continue;
@@ -149,9 +134,7 @@ impl Rest {
         let path_suffix = format!("/{}/messages", channel_id);
         let url = format!("{}{}", BASE_URL, path);
 
-        let resp = self
-            .do_req(&path_suffix, |c, _t| c.get(&url), true)
-            .await?;
+        let resp = self.do_req(&path_suffix, |c, _t| c.get(&url), true).await?;
 
         let status = resp.status().as_u16();
         if status != 200 {
@@ -184,22 +167,24 @@ impl Rest {
         let upload_size = data.len();
         debug!(
             channel_id,
-            upload_size,
-            "Starting regular Discord attachment upload"
+            upload_size, "Starting regular Discord attachment upload"
         );
 
         let fname = Uuid::new_v4().to_string();
-        let data_vec = data.to_vec();  // Convert once, not in the closure
+        let data_vec = data.to_vec(); // Convert once, not in the closure
         let resp = self
-            .do_req(&path_suffix, move |c, _t| {
-                let part = reqwest::multipart::Part::bytes(data_vec.clone())
-                    .file_name(fname.clone())
-                    .mime_str("application/octet-stream")
-                    .expect("invalid mime type");
-                let form = reqwest::multipart::Form::new()
-                    .part(MESSAGE_FILE_FORM_FIELD, part);
-                c.post(&url).multipart(form)
-            }, false)
+            .do_req(
+                &path_suffix,
+                move |c, _t| {
+                    let part = reqwest::multipart::Part::bytes(data_vec.clone())
+                        .file_name(fname.clone())
+                        .mime_str("application/octet-stream")
+                        .expect("invalid mime type");
+                    let form = reqwest::multipart::Form::new().part(MESSAGE_FILE_FORM_FIELD, part);
+                    c.post(&url).multipart(form)
+                },
+                false,
+            )
             .await?;
 
         let status = resp.status().as_u16();
@@ -207,10 +192,7 @@ impl Rest {
             let body = resp.text().await.unwrap_or_default();
             error!(
                 channel_id,
-                upload_size,
-                status,
-                body,
-                "Regular Discord attachment upload failed"
+                upload_size, status, body, "Regular Discord attachment upload failed"
             );
             return Err(DdrvError::Other(format!(
                 "Discord API error: expected 200 or 201, got {}: {}",
@@ -235,8 +217,7 @@ impl Rest {
         let upload_size = data.len();
         debug!(
             channel_id,
-            upload_size,
-            "Starting nitro Discord attachment upload"
+            upload_size, "Starting nitro Discord attachment upload"
         );
 
         // Step 1 – request a pre-signed upload URL.
@@ -247,11 +228,15 @@ impl Rest {
         );
 
         let resp = self
-            .do_req(&path_suffix, move |c, _t| {
-                c.post(&req_url)
-                    .header("Content-Type", "application/json")
-                    .body(body1.clone())
-            }, true)
+            .do_req(
+                &path_suffix,
+                move |c, _t| {
+                    c.post(&req_url)
+                        .header("Content-Type", "application/json")
+                        .body(body1.clone())
+                },
+                true,
+            )
             .await?;
 
         let status = resp.status().as_u16();
@@ -259,10 +244,7 @@ impl Rest {
             let body = resp.text().await.unwrap_or_default();
             error!(
                 channel_id,
-                upload_size,
-                status,
-                body,
-                "Nitro upload pre-sign request failed"
+                upload_size, status, body, "Nitro upload pre-sign request failed"
             );
             return Err(DdrvError::Other(format!(
                 "Discord API error: expected 200 or 201, got {}: {}",
@@ -281,9 +263,11 @@ impl Rest {
         }
 
         let ar: AttachmentResp = resp.json().await?;
-        let entry = ar.attachments.into_iter().next().ok_or_else(|| {
-            DdrvError::Other("nitro: no attachment entry in response".into())
-        })?;
+        let entry = ar
+            .attachments
+            .into_iter()
+            .next()
+            .ok_or_else(|| DdrvError::Other("nitro: no attachment entry in response".into()))?;
 
         // Step 2 – PUT the raw bytes to the pre-signed URL (no auth header).
         let put_resp = self
@@ -296,12 +280,7 @@ impl Rest {
 
         if put_resp.status().as_u16() != 200 {
             let body = put_resp.text().await.unwrap_or_default();
-            error!(
-                channel_id,
-                upload_size,
-                body,
-                "Nitro upload PUT failed"
-            );
+            error!(channel_id, upload_size, body, "Nitro upload PUT failed");
             return Err(DdrvError::Other(format!(
                 "nitro upload PUT failed: {}",
                 body
@@ -316,11 +295,15 @@ impl Rest {
         );
 
         let resp = self
-            .do_req(&path_suffix, move |c, _t| {
-                c.post(&msg_url)
-                    .header("Content-Type", "application/json")
-                    .body(body3.clone())
-            }, true)
+            .do_req(
+                &path_suffix,
+                move |c, _t| {
+                    c.post(&msg_url)
+                        .header("Content-Type", "application/json")
+                        .body(body3.clone())
+                },
+                true,
+            )
             .await?;
 
         let status = resp.status().as_u16();
@@ -328,10 +311,7 @@ impl Rest {
             let body = resp.text().await.unwrap_or_default();
             error!(
                 channel_id,
-                upload_size,
-                status,
-                body,
-                "Nitro upload final message create failed"
+                upload_size, status, body, "Nitro upload final message create failed"
             );
             return Err(DdrvError::Other(format!(
                 "Discord API error: expected 200 or 201, got {}: {}",
@@ -408,9 +388,10 @@ impl Rest {
 
 /// Convert a raw Discord Message (as returned by the API) into a Node.
 fn node_from_message(msg: Message) -> Result<Node> {
-    let att: &NodeAttachment = msg.attachments.first().ok_or_else(|| {
-        DdrvError::Other("create_attachment: message has no attachments".into())
-    })?;
+    let att: &NodeAttachment = msg
+        .attachments
+        .first()
+        .ok_or_else(|| DdrvError::Other("create_attachment: message has no attachments".into()))?;
 
     let (clean_url, ex, is, hm) = decode_attachment_url(&att.url);
     let mid: i64 = msg.id.parse().unwrap_or(0);

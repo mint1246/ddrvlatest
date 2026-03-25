@@ -98,7 +98,11 @@ fn stored_to_file(path: &str, sf: &StoredFile) -> File {
     } else {
         Some(encode_path(pp))
     };
-    let id = if path == ROOT { "root".into() } else { encode_path(path) };
+    let id = if path == ROOT {
+        "root".into()
+    } else {
+        encode_path(path)
+    };
     File {
         id,
         name: sf.name.clone(),

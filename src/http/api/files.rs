@@ -1,15 +1,18 @@
 use axum::{
-    body::Body,
+    body::{Body, Bytes},
     extract::{Multipart, Path, State},
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
+use chrono::Utc;
 use std::sync::{Arc, Mutex};
 use tokio_util::io::ReaderStream;
 
 use super::types::{err, ApiResponse, UpdateFileRequest};
-use crate::{dataprovider, dataprovider::types::DataProviderError, ddrv::types::Node, http::AppState};
+use crate::{
+    dataprovider, dataprovider::types::DataProviderError, ddrv::types::Node, http::AppState,
+};
 
 fn dp_err(e: DataProviderError) -> Response {
     match e {
@@ -142,7 +145,11 @@ pub async fn delete_file_handler(
 ) -> Response {
     let dp = dataprovider::get();
     match dp.delete(&id, Some(&dir_id)).await {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"message": "file deleted"}))).into_response(),
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"message": "file deleted"})),
+        )
+            .into_response(),
         Err(e) => dp_err(e),
     }
 }
@@ -153,6 +160,19 @@ pub async fn download_file_handler(
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Response {
+    stream_file(state, id, headers).await
+}
+
+/// GET /files/:id/:fname  (no auth, pretty filename)
+pub async fn download_file_with_name_handler(
+    State(state): State<AppState>,
+    Path((id, _fname)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    stream_file(state, id, headers).await
+}
+
+async fn stream_file(state: AppState, id: String, headers: HeaderMap) -> Response {
     let dp = dataprovider::get();
 
     let file = match dp.get_by_id(&id, None).await {
@@ -174,6 +194,15 @@ pub async fn download_file_handler(
     let mime = mime_guess::from_ext(ext)
         .first_or_octet_stream()
         .to_string();
+    let disposition = if mime.starts_with("audio/")
+        || mime.starts_with("video/")
+        || mime.starts_with("image/")
+        || mime.starts_with("text/")
+    {
+        format!("inline; filename=\"{}\"", file.name)
+    } else {
+        format!("attachment; filename=\"{}\"", file.name)
+    };
 
     // Handle Range header
     if let Some(range_val) = headers.get(header::RANGE).and_then(|v| v.to_str().ok()) {
@@ -194,6 +223,7 @@ pub async fn download_file_handler(
                         (header::CONTENT_RANGE, content_range),
                         (header::CONTENT_LENGTH, length.to_string()),
                         (header::ACCEPT_RANGES, "bytes".to_string()),
+                        (header::CONTENT_DISPOSITION, disposition.clone()),
                     ],
                     body,
                 )
@@ -217,14 +247,71 @@ pub async fn download_file_handler(
             (header::CONTENT_TYPE, mime),
             (header::CONTENT_LENGTH, file.size.to_string()),
             (header::ACCEPT_RANGES, "bytes".to_string()),
-            (
-                header::CONTENT_DISPOSITION,
-                format!("attachment; filename=\"{}\"", file.name),
-            ),
+            (header::CONTENT_DISPOSITION, disposition),
         ],
         body,
     )
         .into_response()
+}
+
+/// PUT /api/directories/:dir_id/files/:id/content (overwrite bytes)
+pub async fn overwrite_file_handler(
+    State(state): State<AppState>,
+    Path((dir_id, id)): Path<(String, String)>,
+    body: Bytes,
+) -> Response {
+    let dp = dataprovider::get();
+
+    let mut file = match dp.get_by_id(&id, Some(&dir_id)).await {
+        Ok(f) => f,
+        Err(e) => return dp_err(e),
+    };
+
+    let data = body;
+    let nodes: Arc<Mutex<Vec<Node>>> = Arc::new(Mutex::new(Vec::new()));
+
+    // Write new content to storage
+    if state.config.async_write {
+        let nodes_cb = Arc::clone(&nodes);
+        let mut writer = state.driver.new_nwriter(move |chunk| {
+            nodes_cb.lock().expect("nodes mutex poisoned").push(chunk);
+        });
+        use tokio::io::AsyncWriteExt;
+        if let Err(e) = writer.write_all(&data).await {
+            return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+        }
+        if let Err(e) = writer.shutdown().await {
+            return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+        }
+    } else {
+        let nodes_cb = Arc::clone(&nodes);
+        let mut writer = state.driver.new_writer(move |chunk| {
+            nodes_cb.lock().expect("nodes mutex poisoned").push(chunk);
+        });
+        use tokio::io::AsyncWriteExt;
+        if let Err(e) = writer.write_all(&data).await {
+            return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+        }
+        if let Err(e) = writer.shutdown().await {
+            return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+        }
+    }
+
+    let collected = nodes.lock().expect("nodes mutex poisoned").clone();
+    if let Err(e) = dp.truncate(&id).await {
+        return dp_err(e);
+    }
+    if let Err(e) = dp.create_nodes(&id, &collected).await {
+        return dp_err(e);
+    }
+
+    file.size = data.len() as i64;
+    file.mtime = Utc::now();
+
+    match dp.update(&id, Some(&dir_id), &file).await {
+        Ok(f) => ApiResponse::ok(f).into_response(),
+        Err(e) => dp_err(e),
+    }
 }
 
 /// Parse "bytes=start-end" range header. Returns (start, end, length).
@@ -268,7 +355,10 @@ struct LimitedReader<R> {
 
 impl<R> LimitedReader<R> {
     fn new(inner: R, limit: usize) -> Self {
-        LimitedReader { inner, remaining: limit }
+        LimitedReader {
+            inner,
+            remaining: limit,
+        }
     }
 }
 

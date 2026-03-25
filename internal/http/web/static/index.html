@@ -283,6 +283,35 @@
   </div>
 </dialog>
 
+<!-- Viewer Dialog -->
+<dialog id="viewer-dialog" aria-labelledby="viewer-title" aria-modal="true">
+  <div class="dialog-header viewer-header">
+    <div>
+      <div id="viewer-title" class="dialog-title">Preview</div>
+      <div id="viewer-subtitle" class="viewer-subtitle"></div>
+    </div>
+    <div class="viewer-actions">
+      <button class="icon-btn" id="viewer-open-new-btn" aria-label="Open in new tab" title="Open in new tab">
+        <span class="material-symbols-outlined">open_in_new</span>
+      </button>
+      <button class="icon-btn" id="viewer-download-btn" aria-label="Download" title="Download">
+        <span class="material-symbols-outlined">download</span>
+      </button>
+      <button class="icon-btn" id="viewer-close-btn" aria-label="Close preview" title="Close">
+        <span class="material-symbols-outlined">close</span>
+      </button>
+    </div>
+  </div>
+  <div id="viewer-content" class="viewer-content"></div>
+  <div class="dialog-actions viewer-actions-bar">
+    <div class="viewer-status" id="viewer-status"></div>
+    <div style="display:flex;gap:8px;">
+      <button class="btn-text" id="viewer-cancel-btn" type="button">Close</button>
+      <button class="btn-filled hidden" id="viewer-save-btn" type="button">Save</button>
+    </div>
+  </div>
+</dialog>
+
 <!-- Sort Menu -->
 <dialog id="sort-menu" aria-label="Sort options" aria-modal="true">
   <div class="menu-label">Sort by</div>

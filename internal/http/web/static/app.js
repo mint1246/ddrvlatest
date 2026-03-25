@@ -19,6 +19,7 @@ const state = {
   viewMode: localStorage.getItem('view_mode') || 'list',
   isDragging: false,
   uploads: new Map(),    // filename → { el, pct }
+  viewer: null,
   snackTimer: null,
 };
 
@@ -121,6 +122,24 @@ const api = {
     });
   },
 
+  async overwriteFile(dirId, id, content, mime = 'text/plain;charset=utf-8') {
+    const headers = {};
+    if (state.token) headers['Authorization'] = 'Bearer ' + state.token;
+    if (mime) headers['Content-Type'] = mime;
+    const res = await fetch('/api/directories/' + dirId + '/files/' + id + '/content', {
+      method: 'PUT',
+      headers,
+      body: content,
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({ message: res.statusText }));
+      const err = new Error(body.message || res.statusText);
+      err.status = res.status;
+      throw err;
+    }
+    return res.json();
+  },
+
   uploadFile(dirId, file, onProgress) {
     return new Promise((resolve, reject) => {
       const formData = new FormData();
@@ -193,6 +212,30 @@ function fileIcon(file) {
     exe: 'terminal', sh: 'terminal', bash: 'terminal', cmd: 'terminal',
   };
   return map[ext] || 'insert_drive_file';
+}
+
+function fileStreamUrl(file) {
+  return '/files/' + file.id + '/' + encodeURIComponent(file.name);
+}
+
+function isAudioFile(file) {
+  const ext = (file.name || '').split('.').pop().toLowerCase();
+  return ['mp3', 'ogg', 'wav', 'flac', 'aac', 'm4a'].includes(ext);
+}
+
+function isVideoFile(file) {
+  const ext = (file.name || '').split('.').pop().toLowerCase();
+  return ['mp4', 'mkv', 'avi', 'mov', 'webm'].includes(ext);
+}
+
+function isImageFile(file) {
+  const ext = (file.name || '').split('.').pop().toLowerCase();
+  return ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'ico', 'svg'].includes(ext);
+}
+
+function isTextFile(file) {
+  const ext = (file.name || '').split('.').pop().toLowerCase();
+  return ['txt', 'md', 'json', 'js', 'ts', 'py', 'rs', 'go', 'java', 'c', 'cpp', 'css', 'html', 'csv', 'log', 'yaml', 'yml'].includes(ext);
 }
 
 function filteredAndSorted() {
@@ -493,8 +536,108 @@ async function navigateTo(id, crumbIndex = null) {
 }
 
 function openFile(file) {
-  const url = '/files/' + file.id + '/' + encodeURIComponent(file.name);
-  window.open(url, '_blank');
+  if (file.dir) {
+    navigateTo(file.id);
+    return;
+  }
+  if (isAudioFile(file) || isVideoFile(file) || isImageFile(file) || isTextFile(file)) {
+    openViewer(file);
+    return;
+  }
+  window.open(fileStreamUrl(file), '_blank');
+}
+
+async function openViewer(file) {
+  state.viewer = file;
+  const dlg = document.getElementById('viewer-dialog');
+  const title = document.getElementById('viewer-title');
+  const subtitle = document.getElementById('viewer-subtitle');
+  const content = document.getElementById('viewer-content');
+  const saveBtn = document.getElementById('viewer-save-btn');
+  const statusEl = document.getElementById('viewer-status');
+
+  if (!dlg || !content || !title) {
+    window.open(fileStreamUrl(file), '_blank');
+    return;
+  }
+
+  title.textContent = file.name || 'File';
+  if (subtitle) subtitle.textContent = file.size ? file.size : '';
+  statusEl.textContent = '';
+  if (saveBtn) saveBtn.classList.add('hidden');
+  content.innerHTML = '<div class="viewer-loading">Loading preview…</div>';
+
+  const url = fileStreamUrl(file);
+  try {
+    if (isAudioFile(file)) {
+      content.innerHTML = `
+        <div class="viewer-media">
+          <audio controls autoplay src="${url}"></audio>
+        </div>`;
+    } else if (isVideoFile(file)) {
+      content.innerHTML = `
+        <div class="viewer-media">
+          <video controls autoplay src="${url}" playsinline></video>
+        </div>`;
+    } else if (isImageFile(file)) {
+      content.innerHTML = `
+        <div class="viewer-media">
+          <img src="${url}" alt="${escHtml(file.name)}" loading="lazy">
+        </div>`;
+    } else if (isTextFile(file)) {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error('Failed to load file');
+      const text = await res.text();
+      content.innerHTML = `
+        <div class="viewer-text-wrap">
+          <textarea id="viewer-textarea" spellcheck="false"></textarea>
+        </div>`;
+      const ta = document.getElementById('viewer-textarea');
+      if (ta) ta.value = text;
+      if (saveBtn) saveBtn.classList.remove('hidden');
+    } else {
+      content.innerHTML = `
+        <div class="viewer-fallback">
+          <span class="material-symbols-outlined">cloud_download</span>
+          <p>No preview available. Open in a new tab to download.</p>
+        </div>`;
+    }
+    dlg.showModal();
+  } catch (err) {
+    content.innerHTML = `<div class="viewer-error">${escHtml(err.message || 'Unable to preview file')}</div>`;
+    dlg.showModal();
+  }
+}
+
+function closeViewer() {
+  const dlg = document.getElementById('viewer-dialog');
+  if (dlg?.open) dlg.close();
+  state.viewer = null;
+}
+
+async function saveViewerEdits() {
+  const file = state.viewer;
+  if (!file) return;
+  const ta = document.getElementById('viewer-textarea');
+  const btn = document.getElementById('viewer-save-btn');
+  const statusEl = document.getElementById('viewer-status');
+  if (!ta || !btn) return;
+
+  btn.disabled = true;
+  statusEl.textContent = 'Saving…';
+  try {
+    await api.overwriteFile(state.directory.id || 'root', file.id, ta.value);
+    statusEl.textContent = 'Saved';
+    showSnack('Saved changes to ' + file.name);
+    closeViewer();
+    await navigateTo(state.directory.id);
+  } catch (err) {
+    statusEl.textContent = 'Save failed';
+    if (err.status === 401) handleUnauthorized();
+    else showSnack('Save failed: ' + err.message, 'error');
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 /* ══════════════════════════════════════════════════════════
@@ -1082,6 +1225,19 @@ document.addEventListener('DOMContentLoaded', () => {
       si?.focus();
       si?.select();
     }
+  });
+
+  // ── Viewer ─────────────────────────────────────────────
+  document.getElementById('viewer-close-btn')?.addEventListener('click', closeViewer);
+  document.getElementById('viewer-cancel-btn')?.addEventListener('click', closeViewer);
+  document.getElementById('viewer-save-btn')?.addEventListener('click', saveViewerEdits);
+  document.getElementById('viewer-open-new-btn')?.addEventListener('click', () => {
+    const f = state.viewer;
+    if (f) window.open(fileStreamUrl(f), '_blank');
+  });
+  document.getElementById('viewer-download-btn')?.addEventListener('click', () => {
+    const f = state.viewer;
+    if (f) window.open(fileStreamUrl(f), '_blank');
   });
 
   // ── Init ──────────────────────────────────────────────
