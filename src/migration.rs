@@ -149,6 +149,25 @@ fn write_redb_from_export(output: &Path, export: LegacyExport) -> Result<()> {
     Ok(())
 }
 
+fn stage_legacy_input(workdir: &Path, input: &Path) -> Result<std::path::PathBuf> {
+    let staged_input = workdir.join("legacy.db");
+    fs::copy(input, &staged_input).with_context(|| {
+        format!(
+            "copy legacy input {} to temporary exporter workspace",
+            input.display()
+        )
+    })?;
+    let mut staged_perms = fs::metadata(&staged_input)
+        .with_context(|| format!("read staged input metadata {}", staged_input.display()))?
+        .permissions();
+    if staged_perms.readonly() {
+        staged_perms.set_readonly(false);
+        fs::set_permissions(&staged_input, staged_perms)
+            .with_context(|| format!("set staged input writable {}", staged_input.display()))?;
+    }
+    Ok(staged_input)
+}
+
 fn run_go_exporter(input: &Path) -> Result<LegacyExport> {
     let workdir = std::env::temp_dir().join(format!("ddrv-migrator-{}", uuid::Uuid::new_v4()));
     fs::create_dir_all(&workdir).context("create temporary go exporter dir")?;
@@ -345,6 +364,8 @@ os.Exit(1)
     fs::write(workdir.join("go.mod"), go_mod).context("write exporter go.mod")?;
     fs::write(workdir.join("main.go"), go_src).context("write exporter main.go")?;
 
+    let staged_input = stage_legacy_input(&workdir, input)?;
+
     let mod_tidy = Command::new("go")
         .arg("mod")
         .arg("tidy")
@@ -362,7 +383,7 @@ os.Exit(1)
     let output = Command::new("go")
         .arg("run")
         .arg(".")
-        .arg(input)
+        .arg(staged_input)
         .current_dir(&workdir)
         .output()
         .context("run temporary Go exporter")?;
@@ -397,6 +418,18 @@ pub fn migrate_legacy_boltdb(input: &Path, output: &Path, force: bool) -> Result
                 output.display()
             );
         }
+    }
+
+    let input_meta = fs::metadata(input)
+        .with_context(|| format!("failed to read input file metadata: {}", input.display()))?;
+    if input_meta.len() == 0 {
+        return write_redb_from_export(
+            output,
+            LegacyExport {
+                files: Vec::new(),
+                nodes: Vec::new(),
+            },
+        );
     }
 
     let export = run_go_exporter(input)?;
@@ -479,5 +512,59 @@ mod tests {
         assert_eq!(node_data.size, 10);
 
         fs::remove_file(out).ok();
+    }
+
+    #[test]
+    fn migrates_zero_length_legacy_db_without_exporter() {
+        let input = temp_file("ddrv-migrate-empty-in");
+        let output = temp_file("ddrv-migrate-empty-out");
+        fs::write(&input, []).expect("create zero-length legacy db file");
+
+        migrate_legacy_boltdb(&input, &output, true).expect("zero-length migration should succeed");
+
+        let db = Database::open(&output).expect("open output redb");
+        let tx = db.begin_read().expect("begin read");
+        let fs_table = tx.open_table(FS_TABLE).expect("open fs table");
+
+        let root = fs_table
+            .get("/")
+            .expect("read root")
+            .expect("root should exist");
+        let root_file: StoredFile = bincode::deserialize(root.value()).expect("decode root");
+        assert!(root_file.dir);
+
+        fs::remove_file(input).ok();
+        fs::remove_file(output).ok();
+    }
+
+    #[test]
+    fn stages_input_db_into_exporter_workdir() {
+        let input = temp_file("ddrv-migrate-ro-in");
+        fs::write(&input, b"legacy-data").expect("create source db fixture");
+
+        let workdir = std::env::temp_dir().join(format!("ddrv-migrate-work-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&workdir).expect("create workdir");
+
+        let mut perms = fs::metadata(&input).expect("stat input").permissions();
+        perms.set_readonly(true);
+        fs::set_permissions(&input, perms).expect("set readonly permissions");
+
+        let staged = stage_legacy_input(&workdir, &input).expect("stage input db");
+        let staged_bytes = fs::read(&staged).expect("read staged bytes");
+        assert_eq!(staged_bytes, b"legacy-data");
+        assert!(
+            !fs::metadata(&staged)
+                .expect("stat staged input")
+                .permissions()
+                .readonly(),
+            "staged db should be writable for exporter"
+        );
+
+        let mut writable = fs::metadata(&input).expect("restat input").permissions();
+        writable.set_readonly(false);
+        fs::set_permissions(&input, writable).expect("restore input permissions");
+
+        fs::remove_file(input).ok();
+        fs::remove_dir_all(workdir).ok();
     }
 }
