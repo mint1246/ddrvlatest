@@ -1,7 +1,7 @@
 use std::io;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
@@ -34,8 +34,10 @@ impl NWriter {
         num_channels: usize,
         on_chunk: impl FnMut(Node) + Send + 'static,
     ) -> Self {
-        // The duplex buffer is large enough to keep all workers busy.
-        let buf_cap = chunk_size * num_channels.max(1) * 2;
+        // Keep enough buffering for throughput without excessive pre-allocation.
+        let worker_count = num_channels.max(1);
+        let base = chunk_size.saturating_mul(worker_count);
+        let buf_cap = base.clamp(256 * 1024, 128 * 1024 * 1024);
         let (pipe_write, pipe_read) = tokio::io::duplex(buf_cap);
 
         let handle = tokio::spawn(run_workers(pipe_read, rest, chunk_size, num_channels));
@@ -74,10 +76,7 @@ impl AsyncWrite for NWriter {
         }
     }
 
-    fn poll_flush(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<io::Result<()>> {
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.as_mut().get_mut();
         if let Some(pipe) = this.pipe.as_mut() {
             Pin::new(pipe).poll_flush(cx)
@@ -86,10 +85,7 @@ impl AsyncWrite for NWriter {
         }
     }
 
-    fn poll_shutdown(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<io::Result<()>> {
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.as_mut().get_mut();
 
         if this.closed {
@@ -110,10 +106,16 @@ impl AsyncWrite for NWriter {
                 let mut nodes: Vec<Node> = match res {
                     Ok(Ok(n)) => n,
                     Ok(Err(e)) => {
-                        return Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, e.to_string())))
+                        return Poll::Ready(Err(io::Error::new(
+                            io::ErrorKind::Other,
+                            e.to_string(),
+                        )))
                     }
                     Err(e) => {
-                        return Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, e.to_string())))
+                        return Poll::Ready(Err(io::Error::new(
+                            io::ErrorKind::Other,
+                            e.to_string(),
+                        )))
                     }
                 };
 

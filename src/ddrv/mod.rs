@@ -65,7 +65,12 @@ impl Driver {
     /// Create a parallel chunk writer (one uploader task per Discord channel).
     pub fn new_nwriter(&self, on_chunk: impl FnMut(Node) + Send + 'static) -> nwriter::NWriter {
         let num_channels = self.rest.num_channels();
-        nwriter::NWriter::new(Arc::clone(&self.rest), self.chunk_size, num_channels, on_chunk)
+        nwriter::NWriter::new(
+            Arc::clone(&self.rest),
+            self.chunk_size,
+            num_channels,
+            on_chunk,
+        )
     }
 
     /// Create an async reader that reassembles `chunks` starting at byte `pos`.
@@ -75,43 +80,65 @@ impl Driver {
 
     /// Refresh any chunks whose CDN URL has expired.
     pub async fn update_nodes(&self, chunks: &mut [Node]) -> Result<()> {
-        use std::collections::HashMap;
         use crate::ddrv::utils::extract_channel_id;
+        use futures::stream::{self, StreamExt};
+        use std::collections::HashMap;
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64;
 
-        // Collect expired message IDs (deduplicated).
-        let mut expired: HashMap<i64, usize> = HashMap::new();
-        for (i, chunk) in chunks.iter().enumerate() {
+        // Collect expired message IDs (deduplicated) and their channel IDs.
+        let mut expired: HashMap<i64, String> = HashMap::new();
+        for chunk in chunks.iter() {
             if now > chunk.ex {
-                expired.insert(chunk.mid, i);
+                expired
+                    .entry(chunk.mid)
+                    .or_insert_with(|| extract_channel_id(&chunk.url));
             }
         }
 
-        for (&mid, &chunk_idx) in &expired {
-            let chunk = &chunks[chunk_idx];
-            let channel_id = extract_channel_id(&chunk.url);
-            let mut messages: Vec<Message> = Vec::new();
-            self.rest
-                .get_messages(&channel_id, mid - 1, "after", &mut messages)
-                .await?;
+        if expired.is_empty() {
+            return Ok(());
+        }
 
-            for msg in &messages {
-                let id: i64 = msg.id.parse().unwrap_or(0);
-                // Find any chunk in our slice with this message id and update it.
-                for chunk in chunks.iter_mut() {
-                    if chunk.mid == id {
-                        if let Some(att) = msg.attachments.first() {
-                            let (url, ex, is, hm) =
-                                utils::decode_attachment_url(&att.url);
-                            chunk.url = url;
-                            chunk.ex = ex;
-                            chunk.is = is;
-                            chunk.hm = hm;
-                        }
+        let mut chunks_by_mid: HashMap<i64, Vec<usize>> = HashMap::new();
+        for (idx, chunk) in chunks.iter().enumerate() {
+            chunks_by_mid.entry(chunk.mid).or_default().push(idx);
+        }
+
+        let rest = Arc::clone(&self.rest);
+        let mut fetches = stream::iter(expired.into_iter().map(move |(mid, channel_id)| {
+            let rest = Arc::clone(&rest);
+            async move {
+                let mut messages = Vec::new();
+                rest.get_messages(&channel_id, mid - 1, "after", &mut messages)
+                    .await?;
+                Ok::<Vec<Message>, DdrvError>(messages)
+            }
+        }))
+        .buffer_unordered(8);
+
+        let mut messages_by_id: HashMap<i64, Message> = HashMap::new();
+        while let Some(messages) = fetches.next().await {
+            for msg in messages? {
+                if let Ok(mid) = msg.id.parse::<i64>() {
+                    messages_by_id.insert(mid, msg);
+                }
+            }
+        }
+
+        for (mid, indexes) in chunks_by_mid {
+            if let Some(msg) = messages_by_id.get(&mid) {
+                if let Some(att) = msg.attachments.first() {
+                    let (url, ex, is, hm) = utils::decode_attachment_url(&att.url);
+                    for idx in indexes {
+                        let chunk = &mut chunks[idx];
+                        chunk.url = url.clone();
+                        chunk.ex = ex;
+                        chunk.is = is;
+                        chunk.hm = hm.clone();
                     }
                 }
             }

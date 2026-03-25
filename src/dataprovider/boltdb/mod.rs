@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use base64::Engine as _;
@@ -123,7 +123,7 @@ fn node_range_end(path: &str) -> String {
 // ── provider ─────────────────────────────────────────────────────────────────
 
 pub struct BoltDbProvider {
-    db: Arc<Mutex<Database>>,
+    db: Arc<RwLock<Database>>,
     driver: Arc<Driver>,
 }
 
@@ -150,7 +150,7 @@ impl BoltDbProvider {
         write_txn.commit()?;
 
         Ok(Self {
-            db: Arc::new(Mutex::new(db)),
+            db: Arc::new(RwLock::new(db)),
             driver,
         })
     }
@@ -172,7 +172,7 @@ impl DataProvider for BoltDbProvider {
         let db = Arc::clone(&self.db);
 
         tokio::task::spawn_blocking(move || -> Result<File> {
-            let db = db.lock().unwrap();
+            let db = db.read().unwrap();
             let read_txn = db.begin_read()?;
             let table = read_txn.open_table(FS_TABLE)?;
             let sf = get_stored_file(&table, &path)?;
@@ -195,18 +195,15 @@ impl DataProvider for BoltDbProvider {
         let db = Arc::clone(&self.db);
 
         tokio::task::spawn_blocking(move || -> Result<Vec<File>> {
-            let db = db.lock().unwrap();
+            let db = db.read().unwrap();
             let read_txn = db.begin_read()?;
             let table = read_txn.open_table(FS_TABLE)?;
 
-            let entries = collect_all_fs(&table)?;
-            let mut children = Vec::new();
-            for (p, sf) in entries {
-                if p != ROOT && is_direct_child(&path, &p) {
-                    children.push(stored_to_file(&p, &sf));
-                }
-            }
-            Ok(children)
+            let entries = collect_direct_children(&table, &path)?;
+            Ok(entries
+                .into_iter()
+                .map(|(p, sf)| stored_to_file(&p, &sf))
+                .collect())
         })
         .await
         .map_err(|e| DataProviderError::Other(e.to_string()))?
@@ -218,7 +215,7 @@ impl DataProvider for BoltDbProvider {
         let db = Arc::clone(&self.db);
 
         tokio::task::spawn_blocking(move || -> Result<File> {
-            let db = db.lock().unwrap();
+            let db = db.write().unwrap();
             let new_path = clean_path(&format!("{}/{}", parent_path, name));
             let write_txn = db.begin_write()?;
             let file = {
@@ -289,7 +286,7 @@ impl DataProvider for BoltDbProvider {
         // Step 1: read persisted nodes
         let path_clone = path.clone();
         let mut nodes: Vec<Node> = tokio::task::spawn_blocking(move || -> Result<Vec<Node>> {
-            let db = db.lock().unwrap();
+            let db = db.read().unwrap();
             let read_txn = db.begin_read()?;
             let table = read_txn.open_table(NODES_TABLE)?;
             collect_nodes(&table, &path_clone)
@@ -309,7 +306,7 @@ impl DataProvider for BoltDbProvider {
             let updated = nodes.clone();
             let path2 = path.clone();
             tokio::task::spawn_blocking(move || -> Result<()> {
-                let db = db2.lock().unwrap();
+                let db = db2.write().unwrap();
                 let write_txn = db.begin_write()?;
                 {
                     let mut table = write_txn.open_table(NODES_TABLE)?;
@@ -349,7 +346,7 @@ impl DataProvider for BoltDbProvider {
         let db = Arc::clone(&self.db);
 
         tokio::task::spawn_blocking(move || -> Result<()> {
-            let db = db.lock().unwrap();
+            let db = db.write().unwrap();
 
             // Count existing nodes to determine starting nid
             let existing_count: i64 = {
@@ -413,7 +410,7 @@ impl DataProvider for BoltDbProvider {
         let db = Arc::clone(&self.db);
 
         tokio::task::spawn_blocking(move || -> Result<()> {
-            let db = db.lock().unwrap();
+            let db = db.write().unwrap();
             let write_txn = db.begin_write()?;
             {
                 let mut nodes_table = write_txn.open_table(NODES_TABLE)?;
@@ -454,7 +451,7 @@ impl DataProvider for BoltDbProvider {
         let db = Arc::clone(&self.db);
 
         tokio::task::spawn_blocking(move || -> Result<File> {
-            let db = db.lock().unwrap();
+            let db = db.read().unwrap();
             let read_txn = db.begin_read()?;
             let table = read_txn.open_table(FS_TABLE)?;
             let sf = get_stored_file(&table, &path)?;
@@ -469,7 +466,7 @@ impl DataProvider for BoltDbProvider {
         let db = Arc::clone(&self.db);
 
         tokio::task::spawn_blocking(move || -> Result<Vec<File>> {
-            let db = db.lock().unwrap();
+            let db = db.read().unwrap();
             let read_txn = db.begin_read()?;
             let table = read_txn.open_table(FS_TABLE)?;
 
@@ -478,10 +475,9 @@ impl DataProvider for BoltDbProvider {
                 return Err(DataProviderError::NotFound);
             }
 
-            let all = collect_all_fs(&table)?;
-            let mut children: Vec<File> = all
+            let children_entries = collect_direct_children(&table, &path)?;
+            let mut children: Vec<File> = children_entries
                 .iter()
-                .filter(|(p, _)| p != ROOT && is_direct_child(&path, p))
                 .map(|(p, sf)| stored_to_file(p, sf))
                 .collect();
             // Stable sort by name
@@ -504,7 +500,7 @@ impl DataProvider for BoltDbProvider {
         let db = Arc::clone(&self.db);
 
         tokio::task::spawn_blocking(move || -> Result<()> {
-            let db = db.lock().unwrap();
+            let db = db.write().unwrap();
             let write_txn = db.begin_write()?;
             {
                 let mut fs_table = write_txn.open_table(FS_TABLE)?;
@@ -532,7 +528,7 @@ impl DataProvider for BoltDbProvider {
         let db = Arc::clone(&self.db);
 
         tokio::task::spawn_blocking(move || -> Result<()> {
-            let db = db.lock().unwrap();
+            let db = db.write().unwrap();
 
             // Collect all path components bottom-up (root first).
             let mut components: Vec<String> = Vec::new();
@@ -578,7 +574,7 @@ impl DataProvider for BoltDbProvider {
         let db = Arc::clone(&self.db);
 
         tokio::task::spawn_blocking(move || -> Result<()> {
-            let db = db.lock().unwrap();
+            let db = db.write().unwrap();
 
             // Collect FS paths to delete (this path + all descendants)
             let fs_paths: Vec<String> = {
@@ -637,7 +633,7 @@ impl DataProvider for BoltDbProvider {
         let db = Arc::clone(&self.db);
 
         tokio::task::spawn_blocking(move || -> Result<()> {
-            let db = db.lock().unwrap();
+            let db = db.write().unwrap();
 
             // Read all FS entries that will move: (old_path, new_path, raw_bytes)
             let fs_moves: Vec<(String, String, Vec<u8>)> = {
@@ -716,7 +712,7 @@ impl DataProvider for BoltDbProvider {
         let db = Arc::clone(&self.db);
 
         tokio::task::spawn_blocking(move || -> Result<()> {
-            let db = db.lock().unwrap();
+            let db = db.write().unwrap();
             let write_txn = db.begin_write()?;
             {
                 let mut fs_table = write_txn.open_table(FS_TABLE)?;
@@ -754,15 +750,28 @@ fn get_stored_file(
     Ok(sf)
 }
 
-/// Iterate every entry in the FS table and return owned (path, StoredFile) pairs.
-fn collect_all_fs(
+/// Collect direct children of `parent` using a prefix range scan.
+fn collect_direct_children(
     table: &impl ReadableTable<&'static str, &'static [u8]>,
+    parent: &str,
 ) -> Result<Vec<(String, StoredFile)>> {
+    let prefix = if parent == ROOT {
+        "/".to_string()
+    } else {
+        format!("{}/", parent.trim_end_matches('/'))
+    };
+
     let mut out = Vec::new();
-    for entry in table.iter()? {
+    for entry in table.range(prefix.as_str()..)? {
         let (k, v) = entry?;
-        let sf: StoredFile = bincode::deserialize(v.value())?;
-        out.push((k.value().to_owned(), sf));
+        let p = k.value();
+        if !p.starts_with(prefix.as_str()) {
+            break;
+        }
+        if p != ROOT && is_direct_child(parent, p) {
+            let sf: StoredFile = bincode::deserialize(v.value())?;
+            out.push((p.to_owned(), sf));
+        }
     }
     Ok(out)
 }
