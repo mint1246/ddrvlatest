@@ -14,58 +14,61 @@
     <link rel="stylesheet" href="main.css">
 </head>
 <body ng-controller="controller">
+<div id="app-shell" ng-class="{'dragging': isDragging}" ng-drop="onDrop($event)">
 <div id="header">
-    <div>
+    <div class="header-brand">
         <h1 id="title">DDrv</h1>
-        Discord as infinite cloud storage.
+        <div class="subtitle">Discord as infinite cloud storage.</div>
     </div>
     <div ng-controller="authController">
-        <button onclick="loginDialog.showModal()" ng-show="config.anonymous && config.login && !authenticated">
+        <button onclick="loginDialog.showModal()" ng-show="config.anonymous && config.login && !authenticated" class="ghost-btn">
             Login
         </button>
-        <button ng-click="logout()" ng-show="authenticated">
+        <button ng-click="logout()" ng-show="authenticated" class="ghost-btn">
             Logout
         </button>
         <dialog id="loginDialog">
             <h3>DDrv Login</h3>
-            <form ng-submit="login()" style="display: flex;align-items: center">
-                <div>
-                    <label for="username">Username:&nbsp;&nbsp;</label>
-                    <input type="text" id="username" ng-model="username"><br>
-                    <label for="password">Password:&nbsp;&nbsp;&nbsp;</label>
-                    <input type="password" id="password" ng-model="password"><br>
+            <form ng-submit="login()" class="dialog-form">
+                <div class="dialog-fields">
+                    <label for="username">Username</label>
+                    <input type="text" id="username" ng-model="username" autocomplete="username">
+                    <label for="password">Password</label>
+                    <input type="password" id="password" ng-model="password" autocomplete="current-password">
                 </div>
-                <div style="margin: 10px">
+                <div class="dialog-actions">
                     <button type="submit" ng-disabled="!username || !password">
                         Login
                     </button>
                 </div>
             </form>
-            <span>{{loginErrMessage}}</span>
+            <div class="error-message" ng-if="loginErrMessage">{{loginErrMessage}}</div>
         </dialog>
     </div>
 </div>
 
 <dialog id="createFolderDialog">
-    <form ng-submit="createFolder()" style="display: flex; align-items: center">
-        <label for="createFolderInput">Folder name:&nbsp;&nbsp;</label>
-        <input type="text" id="createFolderInput" ng-model="newFolderName"><br>
-        <button type="submit" style="margin: 10px" ng-disabled="!newFolderName">
+    <h3>Create Folder</h3>
+    <form ng-submit="createFolder()" class="dialog-form">
+        <label for="createFolderInput">Folder name</label>
+        <input type="text" id="createFolderInput" ng-model="newFolderName" required>
+        <button type="submit" ng-disabled="!newFolderName">
             Create
         </button>
     </form>
-    <span>{{createFolderErrorMessage}}</span>
+    <div class="error-message" ng-if="createFolderErrorMessage">{{createFolderErrorMessage}}</div>
 </dialog>
 
 <dialog id="renameDialog">
-    <form ng-submit="rename()" style="display: flex; align-items: center">
-        <label for="renameFolderInput">New name:&nbsp;&nbsp;</label>
-        <input type="text" id="renameFolderInput" ng-model="newName"><br>
-        <button type="submit" style="margin: 10px">
+    <h3>Rename</h3>
+    <form ng-submit="rename()" class="dialog-form">
+        <label for="renameFolderInput">New name</label>
+        <input type="text" id="renameFolderInput" ng-model="newName" required>
+        <button type="submit" ng-disabled="!newName">
             Rename
         </button>
     </form>
-    <span>{{renameErrorMessage}}</span>
+    <div class="error-message" ng-if="renameErrorMessage">{{renameErrorMessage}}</div>
 </dialog>
 
 <div ng-show="!appCrashed">
@@ -76,26 +79,42 @@
             </button>
         </div>
         <div id="toolbar-edit">
-            <button onclick="createFolderDialog.showModal()" ng-show="btnCreateFolder">
+            <button onclick="createFolderDialog.showModal()" ng-show="btnCreateFolder" class="toolbar-btn">
                 Create Folder
             </button>
             <input type="file" id="fileUpload" style="display: none;"
-                   onchange="angular.element(this).scope().fileChanged(this.files)" multiple/>
-            <button ng-click="upload()" ng-show="btnUploadFile">
+                    onchange="angular.element(this).scope().fileChanged(this.files)" multiple/>
+            <button ng-click="upload()" ng-show="btnUploadFile" class="toolbar-btn">
                 Upload File
             </button>
 
-            <button ng-click="copyLink()" ng-show="btnCopyLink">
+            <button ng-click="copyLink()" ng-show="btnCopyLink" class="toolbar-btn">
                 Copy Link
             </button>
-            <button onclick="renameDialog.showModal()" ng-show="btnRename">
+            <button onclick="renameDialog.showModal()" ng-show="btnRename" class="toolbar-btn">
                 Rename
             </button>
-            <button ng-click="delete()" ng-show="btnDelete">
+            <button ng-click="delete()" ng-show="btnDelete" class="toolbar-btn danger-btn">
                 Delete
             </button>
         </div>
     </div>
+    <div id="controls">
+        <input id="searchInput" type="search" ng-model="filterText" placeholder="Search files and folders">
+        <select ng-model="sortBy">
+            <option value="name">Sort: Name</option>
+            <option value="size">Sort: Size</option>
+            <option value="mtime">Sort: Modified</option>
+        </select>
+        <button type="button" ng-click="toggleSortDirection()">{{sortDesc ? 'Desc' : 'Asc'}}</button>
+    </div>
+    <div id="dropzone" ng-class="{'active': isDragging}"
+         ondragover="angular.element(this).scope().onDragOver(event)"
+         ondragleave="angular.element(this).scope().onDragLeave(event)"
+         ondrop="angular.element(this).scope().onDrop(event)">
+        Drag & drop files here to upload
+    </div>
+    <div class="status-message" ng-if="statusMessage">{{statusMessage}}</div>
     <div>
         <table>
             <thead>
@@ -109,7 +128,7 @@
             </tr>
             </thead>
             <tbody>
-            <tr ng-repeat="file in directory.files" ng-class="{'bold': file.dir, 'highlight': file.selected}">
+            <tr ng-repeat="file in filteredFiles()" ng-class="{'bold': file.dir, 'highlight': file.selected}">
                 <td>
                     <input type="checkbox" ng-model="file.selected">
                 </td>
@@ -128,5 +147,6 @@
 
 </div>
 <script src="main.js"></script>
+</div>
 </body>
 </html>
