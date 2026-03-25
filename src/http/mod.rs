@@ -28,7 +28,10 @@ pub async fn serve(driver: Arc<crate::ddrv::Driver>, config: HttpConfig) -> anyh
     let app = Router::new()
         // Download route (no auth)
         .route("/files/:id", get(api::files::download_file_handler))
-        .route("/files/:id/:fname", get(api::files::download_file_handler))
+        .route(
+            "/files/:id/:fname",
+            get(api::files::download_file_with_name_handler),
+        )
         // API routes
         .nest("/api", api::router(state.clone()))
         // Static web UI
