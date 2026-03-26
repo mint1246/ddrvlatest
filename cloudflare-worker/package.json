@@ -1,0 +1,14 @@
+{
+  "name": "cloudflare-worker",
+  "version": "1.0.0",
+  "description": "Cloudflare Worker CORS proxy for Discord CDN",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"No tests for the Cloudflare worker\""
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "private": true
+}
