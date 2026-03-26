@@ -6,6 +6,7 @@ use axum::{
     Json,
 };
 use chrono::Utc;
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use tokio_util::io::ReaderStream;
@@ -163,6 +164,9 @@ pub async fn delete_file_handler(
 pub struct ChunkInfo {
     /// Authenticated Discord CDN URL for this chunk (includes `ex`/`is`/`hm` params).
     pub url: String,
+    /// Alternate Discord CDN hosts to try if the primary URL is blocked by CORS.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alternates: Vec<String>,
     /// Start byte offset of this chunk within the complete file.
     pub start: u64,
     /// End byte offset (inclusive) of this chunk within the complete file.
@@ -192,6 +196,28 @@ pub struct ManifestQuery {
     /// Keeping this small limits the number of Discord API URL-refresh calls made
     /// per request, which reduces rate-limiting pressure on large files.
     pub limit: Option<usize>,
+}
+
+/// Generate alternate Discord CDN host URLs for a given attachment URL.
+fn discord_cdn_alternates(url: &str) -> Vec<String> {
+    // Known Discord CDN hostnames that serve attachments.
+    const HOSTS: [&str; 2] = ["cdn.discordapp.com", "media.discordapp.net"];
+
+    let parsed = match Url::parse(url) {
+        Ok(u) => u,
+        Err(_) => return Vec::new(),
+    };
+
+    let current = parsed.host_str().unwrap_or_default();
+    HOSTS
+        .iter()
+        .filter(|host| **host != current)
+        .filter_map(|host| {
+            let mut alt = parsed.clone();
+            alt.set_host(Some(host)).ok()?;
+            Some(alt.to_string())
+        })
+        .collect()
 }
 
 /// GET /files/:id/manifest  (no auth)
@@ -263,8 +289,11 @@ pub async fn manifest_file_handler(
             let size = n.size as u64;
             let end = running_offset + size - 1;
             running_offset = end + 1;
+            let url = encode_attachment_url(&n.url, n.ex, n.is, &n.hm);
+            let alternates = discord_cdn_alternates(&url);
             ChunkInfo {
-                url: encode_attachment_url(&n.url, n.ex, n.is, &n.hm),
+                url,
+                alternates,
                 start,
                 end,
                 size,

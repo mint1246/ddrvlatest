@@ -562,6 +562,60 @@ const MANIFEST_BATCH = 5;
 // The browser's download manager needs time to start reading the URL before
 // it can be revoked; 30 s is ample even on slow devices.
 const BLOB_URL_REVOKE_DELAY_MS = 30000;
+const DISCORD_CDN_HOSTS = ['cdn.discordapp.com', 'media.discordapp.net'];
+
+function buildChunkUrlCandidates(chunk) {
+  const urls = [];
+  const seen = new Set();
+  const alternates = Array.isArray(chunk?.alternates) ? chunk.alternates : [];
+
+  function add(url) {
+    if (!url || seen.has(url)) return;
+    seen.add(url);
+    urls.push(url);
+  }
+
+  function addHostVariants(url) {
+    try {
+      const u = new URL(url);
+      if (!DISCORD_CDN_HOSTS.includes(u.hostname)) return;
+      for (const host of DISCORD_CDN_HOSTS) {
+        if (host === u.hostname) continue;
+        const copy = new URL(url);
+        copy.hostname = host;
+        add(copy.toString());
+      }
+    } catch (_) {
+      /* ignore parse errors */
+    }
+  }
+
+  add(chunk?.url);
+  alternates.forEach(add);
+
+  if (chunk?.url) addHostVariants(chunk.url);
+  alternates.forEach(addHostVariants);
+
+  return urls;
+}
+
+async function fetchChunkBuffer(chunk) {
+  const candidates = buildChunkUrlCandidates(chunk);
+  let lastErr = null;
+
+  for (const url of candidates) {
+    try {
+      const res = await fetch(url, { mode: 'cors', referrerPolicy: 'no-referrer' });
+      if (!res.ok) throw new Error('Chunk fetch failed: ' + res.status);
+      return await res.arrayBuffer();
+    } catch (err) {
+      console.warn('Chunk fetch failed, trying next host', url, err);
+      lastErr = err;
+    }
+  }
+
+  throw lastErr || new Error('Chunk fetch failed');
+}
 
 async function downloadFile(file) {
   // For directories there is nothing to download.
@@ -619,10 +673,7 @@ async function downloadFile(file) {
       // Update progress as each individual chunk completes for a smooth bar.
       const chunkBuffers = await Promise.all(
         manifest.chunks.map(function(chunk) {
-          return fetch(chunk.url).then(function(r) {
-            if (!r.ok) throw new Error('Chunk fetch failed: ' + r.status);
-            return r.arrayBuffer();
-          }).then(function(buf) {
+          return fetchChunkBuffer(chunk).then(function(buf) {
             doneChunks++;
             setProgress(totalChunks > 0 ? (doneChunks / totalChunks) * 100 : 0);
             return buf;
