@@ -1438,9 +1438,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const f = state.viewer;
     if (f) window.open(fileStreamUrl(f), '_blank');
   });
-  document.getElementById('viewer-download-btn')?.addEventListener('click', () => {
+  document.getElementById('viewer-download-btn')?.addEventListener('click', async () => {
     const f = state.viewer;
-    if (f) window.open(fileStreamUrl(f), '_blank');
+    if (f) await downloadFile(f);
   });
 
   // ── Init ──────────────────────────────────────────────
