@@ -181,7 +181,8 @@ const api = {
 function setAuthToken(token) {
   state.token = token;
   localStorage.setItem('auth_token', token);
-  document.cookie = `ddrv_token=${encodeURIComponent(token)}; Max-Age=${60 * 60 * 24 * 30}; Path=/; SameSite=Lax`;
+  const secure = location.protocol === 'https:' ? '; Secure' : '';
+  document.cookie = `ddrv_token=${encodeURIComponent(token)}; Max-Age=${60 * 60 * 24 * 30}; Path=/; SameSite=Lax${secure}`;
 }
 
 function clearAuthToken() {
@@ -741,7 +742,6 @@ const card = document.createElement('div');
 
       // Download each chunk in this batch directly from Discord CDN in parallel.
       // Update progress as each individual chunk completes for a smooth bar.
-      const chunkBuffers = [];
       for (const chunk of manifest.chunks) {
         const buf = await fetchChunkBuffer(chunk);
         const chunkBytes = chunk?.size || buf.byteLength || 0;
@@ -751,7 +751,6 @@ const card = document.createElement('div');
         updateStats();
 
         if (streamSave && writer && !saveFailed) {
-          // enqueue writes to avoid overwhelming the writer with parallel promises
           flushQueue.push((async () => {
             try {
               await writer.write(new Uint8Array(buf));
@@ -760,14 +759,13 @@ const card = document.createElement('div');
               buffers.push(buf);
             }
           })());
-          if (flushQueue.length > 4) {
+          if (flushQueue.length > 2) {
             await Promise.all(flushQueue);
             flushQueue = [];
           }
         } else {
           buffers.push(buf);
         }
-        chunkBuffers.push(buf);
       }
       if (flushQueue.length) {
         await Promise.all(flushQueue);
@@ -1113,6 +1111,14 @@ async function initApp() {
     state.config = configRes.data || {};
   } catch {
     state.config = { login: false, anonymous: true };
+  }
+
+  // Rehydrate token from cookie/localStorage and persist both so they stay in sync.
+  if (state.token) {
+    setAuthToken(state.token);
+  } else {
+    const cookieToken = readTokenFromCookie();
+    if (cookieToken) setAuthToken(cookieToken);
   }
 
   // Check token
