@@ -123,6 +123,8 @@ pub struct HttpConfig {
     pub https_keypath: Option<String>,
     pub https_crtpath: Option<String>,
     #[serde(default)]
+    pub cdn_proxy_base: Option<String>,
+    #[serde(default)]
     pub username: String,
     #[serde(default)]
     pub password: String,
@@ -190,6 +192,9 @@ pub fn load(config_path: Option<&str>) -> anyhow::Result<Config> {
     }
     if let Ok(v) = std::env::var("HTTP_ADDR") {
         builder = builder.set_override("frontend.http.addr", v)?;
+    }
+    if let Ok(v) = std::env::var("CDN_PROXY_BASE") {
+        builder = builder.set_override("frontend.http.cdn_proxy_base", v)?;
     }
     if let Ok(v) = std::env::var("HTTP_USERNAME") {
         builder = builder.set_override("frontend.http.username", v)?;

@@ -199,13 +199,22 @@ pub struct ManifestQuery {
 }
 
 /// Append `download=1` to a Discord CDN URL, preserving existing query params.
-fn discord_cdn_download_url(url: &str) -> String {
+fn discord_cdn_download_url(url: &str, proxy_base: Option<&str>) -> String {
     let mut parsed = match Url::parse(url) {
         Ok(u) => u,
         Err(_) => return url.to_string(),
     };
     parsed.query_pairs_mut().append_pair("download", "1");
-    parsed.to_string()
+    let with_download = parsed.to_string();
+
+    if let Some(base) = proxy_base {
+        if let Ok(mut proxy) = Url::parse(base) {
+            proxy.query_pairs_mut().append_pair("url", &with_download);
+            return proxy.to_string();
+        }
+    }
+
+    with_download
 }
 
 /// GET /files/:id/manifest  (no auth)
@@ -218,7 +227,7 @@ fn discord_cdn_download_url(url: &str) -> String {
 /// Supports pagination via `?offset=N&limit=K` to spread URL-refresh calls
 /// across multiple requests and avoid Discord API rate limits for large files.
 pub async fn manifest_file_handler(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Path(id): Path<String>,
     Query(query): Query<ManifestQuery>,
 ) -> Response {
@@ -278,7 +287,8 @@ pub async fn manifest_file_handler(
             let end = running_offset + size - 1;
             running_offset = end + 1;
             let url = encode_attachment_url(&n.url, n.ex, n.is, &n.hm);
-            let download_url = discord_cdn_download_url(&url);
+            let download_url =
+                discord_cdn_download_url(&url, state.config.cdn_proxy_base.as_deref());
             ChunkInfo {
                 url,
                 download_url,

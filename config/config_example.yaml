@@ -69,6 +69,12 @@ frontend:
     # The HTTP server provides file transfer and management capabilities via a web interface.
     # Env: HTTP_ADDR
     addr: ":2526"
+    # Optional: Cloudflare Worker base URL to proxy Discord CDN (CORS-safe chunk downloads).
+    # Example: "https://your-worker.workers.dev/"
+    # If set, manifests will emit download URLs like
+    #   https://your-worker.workers.dev/?url=https%3A%2F%2Fcdn.discordapp.com%2F...
+    # Env: CDN_PROXY_BASE
+    cdn_proxy_base:
     # HTTPS server address configuration.
     # Format: ":port" (e.g., ":443").
     # This is typically set to port 443 for HTTPS.

@@ -28,9 +28,10 @@ USAGE
 
 DISCORD CDN CORS WORKER
 -----------------------
-- The Cloudflare Worker source lives in `cloudflare-worker/` (`index.js`, `wrangler.toml`).
+- Worker source: `cloudflare-worker/index.js` (config in `cloudflare-worker/wrangler.toml`).
 - Deploy with `wrangler publish` from that directory.
-- Client usage: `https://<your-worker>.workers.dev/?url=https://cdn.discordapp.com/attachments/...` (same chunk reassembly logic as before).
+- Configure ddrv to emit worker-backed URLs by setting `frontend.http.cdn_proxy_base` (or env `CDN_PROXY_BASE`, e.g. `https://your-worker.workers.dev/`).
+- Client usage: `https://<your-worker>.workers.dev/?url=https://cdn.discordapp.com/attachments/...` (manifest/download URLs include `download=1` automatically).
 
 USAGE DOCKER
 ------------
