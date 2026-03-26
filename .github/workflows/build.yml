@@ -61,9 +61,41 @@ jobs:
         if: matrix.target != 'aarch64-unknown-linux-gnu'
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Upload artifact
+      - name: Package binary + Cloudflare worker
+        env:
+          TARGET: ${{ matrix.target }}
+          ARTIFACT_NAME: ${{ matrix.artifact_name }}
+          ASSET_NAME: ${{ matrix.asset_name }}
+        run: |
+          python - <<'PY'
+          import os, shutil, pathlib
+
+          root = pathlib.Path(".").resolve()
+          target = os.environ["TARGET"]
+          artifact_name = os.environ["ARTIFACT_NAME"]
+          asset_name = os.environ["ASSET_NAME"]
+
+          bin_path = root / "target" / target / "release" / artifact_name
+          if not bin_path.exists():
+              raise SystemExit(f"Binary not found: {bin_path}")
+
+          bundle_dir = root / "release_bundle"
+          shutil.rmtree(bundle_dir, ignore_errors=True)
+          bundle_dir.mkdir(parents=True, exist_ok=True)
+
+          shutil.copy2(bin_path, bundle_dir / artifact_name)
+          shutil.copytree(root / "cloudflare-worker", bundle_dir / "cloudflare-worker")
+
+          zip_path = root / f"{asset_name}.zip"
+          if zip_path.exists():
+              zip_path.unlink()
+          shutil.make_archive(zip_path.with_suffix(""), "zip", bundle_dir)
+          print(f"Created bundle: {zip_path}")
+          PY
+
+      - name: Upload bundled artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.asset_name }}
-          path: target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
+          name: ${{ matrix.asset_name }}-bundle
+          path: ${{ matrix.asset_name }}.zip
           if-no-files-found: error
