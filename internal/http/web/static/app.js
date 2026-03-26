@@ -182,13 +182,14 @@ function setAuthToken(token) {
   state.token = token;
   localStorage.setItem('auth_token', token);
   const secure = location.protocol === 'https:' ? '; Secure' : '';
-  document.cookie = `ddrv_token=${encodeURIComponent(token)}; Max-Age=${60 * 60 * 24 * 30}; Path=/; SameSite=Lax${secure}`;
+  // Use SameSite=Strict for better persistence across refreshes
+  document.cookie = `ddrv_token=${encodeURIComponent(token)}; Max-Age=${60 * 60 * 24 * 30}; Path=/; SameSite=Strict${secure}`;
 }
 
 function clearAuthToken() {
   state.token = null;
   localStorage.removeItem('auth_token');
-  document.cookie = 'ddrv_token=; Max-Age=0; Path=/; SameSite=Lax';
+  document.cookie = 'ddrv_token=; Max-Age=0; Path=/; SameSite=Strict';
 }
 
 function humanReadableSize(bytes, si = false, dp = 1) {
@@ -698,8 +699,6 @@ const card = document.createElement('div');
     const startedAt  = performance.now();
     let writer       = null;
     let streamSave   = false;
-    let saveFailed   = false;
-    let flushQueue   = [];
 
     // Stream directly to disk when supported to avoid large in-memory buffers.
     if (window.showSaveFilePicker) {
@@ -710,7 +709,13 @@ const card = document.createElement('div');
         writer = await handle.createWritable();
         streamSave = true;
       } catch (err) {
-        streamSave = false; // user cancelled or API blocked; fall back to blob
+        // User cancelled or API blocked
+        if (err.name === 'AbortError') {
+          // User cancelled - just cleanup and return
+          setTimeout(function() { card.remove(); if (progressContainer.children.length === 0) progressContainer.classList.add('hidden'); }, 100);
+          return;
+        }
+        streamSave = false; // fall back to blob
       }
     }
 
@@ -750,33 +755,27 @@ const card = document.createElement('div');
         setProgress(totalChunks > 0 ? (doneChunks / totalChunks) * 100 : 0);
         updateStats();
 
-        if (streamSave && writer && !saveFailed) {
-          flushQueue.push((async () => {
-            try {
-              await writer.write(new Uint8Array(buf));
-            } catch (_) {
-              saveFailed = true;
-              buffers.push(buf);
-            }
-          })());
-          if (flushQueue.length > 2) {
-            await Promise.all(flushQueue);
-            flushQueue = [];
+        if (streamSave && writer) {
+          // Write directly to disk without buffering
+          try {
+            await writer.write(new Uint8Array(buf));
+          } catch (err) {
+            // If write fails, close the writer and throw error
+            await writer.abort().catch(() => {});
+            writer = null;
+            throw new Error('Failed to write to disk: ' + err.message);
           }
         } else {
+          // Only buffer when not streaming
           buffers.push(buf);
         }
-      }
-      if (flushQueue.length) {
-        await Promise.all(flushQueue);
-        flushQueue = [];
       }
       offset += manifest.chunks.length;
     } while (offset < totalChunks);
 
     setProgress(100);
 
-    if (streamSave && writer && !saveFailed) {
+    if (streamSave && writer) {
       await writer.close();
       showSnack('Download saved');
     } else {
@@ -808,7 +807,9 @@ const card = document.createElement('div');
       }
     }, 4000);
   } finally {
-    try { await writer?.abort(); } catch (_) { /* ignore */ }
+    if (writer) {
+      try { await writer.abort(); } catch (_) { /* ignore */ }
+    }
   }
 }
 
