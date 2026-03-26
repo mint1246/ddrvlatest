@@ -164,9 +164,9 @@ pub async fn delete_file_handler(
 pub struct ChunkInfo {
     /// Authenticated Discord CDN URL for this chunk (includes `ex`/`is`/`hm` params).
     pub url: String,
-    /// Alternate Discord CDN hosts to try if the primary URL is blocked by CORS.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub alternates: Vec<String>,
+    /// Same URL but with `download=1` to force raw CDN response headers.
+    /// Some Discord edges add more permissive CORS headers on download responses.
+    pub download_url: String,
     /// Start byte offset of this chunk within the complete file.
     pub start: u64,
     /// End byte offset (inclusive) of this chunk within the complete file.
@@ -198,26 +198,14 @@ pub struct ManifestQuery {
     pub limit: Option<usize>,
 }
 
-/// Generate alternate Discord CDN host URLs for a given attachment URL.
-fn discord_cdn_alternates(url: &str) -> Vec<String> {
-    // Known Discord CDN hostnames that serve attachments.
-    const HOSTS: [&str; 2] = ["cdn.discordapp.com", "media.discordapp.net"];
-
-    let parsed = match Url::parse(url) {
+/// Append `download=1` to a Discord CDN URL, preserving existing query params.
+fn discord_cdn_download_url(url: &str) -> String {
+    let mut parsed = match Url::parse(url) {
         Ok(u) => u,
-        Err(_) => return Vec::new(),
+        Err(_) => return url.to_string(),
     };
-
-    let current = parsed.host_str().unwrap_or_default();
-    HOSTS
-        .iter()
-        .filter(|host| **host != current)
-        .filter_map(|host| {
-            let mut alt = parsed.clone();
-            alt.set_host(Some(host)).ok()?;
-            Some(alt.to_string())
-        })
-        .collect()
+    parsed.query_pairs_mut().append_pair("download", "1");
+    parsed.to_string()
 }
 
 /// GET /files/:id/manifest  (no auth)
@@ -290,10 +278,10 @@ pub async fn manifest_file_handler(
             let end = running_offset + size - 1;
             running_offset = end + 1;
             let url = encode_attachment_url(&n.url, n.ex, n.is, &n.hm);
-            let alternates = discord_cdn_alternates(&url);
+            let download_url = discord_cdn_download_url(&url);
             ChunkInfo {
                 url,
-                alternates,
+                download_url,
                 start,
                 end,
                 size,

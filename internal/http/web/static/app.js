@@ -562,12 +562,12 @@ const MANIFEST_BATCH = 5;
 // The browser's download manager needs time to start reading the URL before
 // it can be revoked; 30 s is ample even on slow devices.
 const BLOB_URL_REVOKE_DELAY_MS = 30000;
-const DISCORD_CDN_HOSTS = ['cdn.discordapp.com', 'media.discordapp.net'];
+const DISCORD_CDN_HOSTS = ['cdn.discordapp.com'];
 
 function buildChunkUrlCandidates(chunk) {
   const urls = [];
   const seen = new Set();
-  const alternates = Array.isArray(chunk?.alternates) ? chunk.alternates : [];
+  const preferred = chunk?.download_url || null;
 
   function add(url) {
     if (!url || seen.has(url)) return;
@@ -575,6 +575,12 @@ function buildChunkUrlCandidates(chunk) {
     urls.push(url);
   }
 
+  // Try the download=1 variant first because some edges attach
+  // more permissive CORS headers on explicit download responses.
+  add(preferred);
+  add(chunk?.url);
+
+  // Only swap among CDN hosts we know serve raw attachments.
   function addHostVariants(url) {
     try {
       const u = new URL(url);
@@ -590,11 +596,8 @@ function buildChunkUrlCandidates(chunk) {
     }
   }
 
-  add(chunk?.url);
-  alternates.forEach(add);
-
+  if (preferred) addHostVariants(preferred);
   if (chunk?.url) addHostVariants(chunk.url);
-  alternates.forEach(addHostVariants);
 
   return urls;
 }
