@@ -181,15 +181,16 @@ const api = {
 function setAuthToken(token) {
   state.token = token;
   localStorage.setItem('auth_token', token);
-  const secure = location.protocol === 'https:' ? '; Secure' : '';
-  // Use SameSite=Lax for better compatibility; Secure only on HTTPS
-  document.cookie = `ddrv_token=${encodeURIComponent(token)}; Max-Age=${60 * 60 * 24 * 30}; Path=/${secure}; SameSite=Lax`;
+  const secure = location.protocol === 'https:' ? 'Secure; ' : '';
+  // Cookie format: name=value; attributes (Secure must come before SameSite)
+  document.cookie = `ddrv_token=${encodeURIComponent(token)}; Max-Age=${60 * 60 * 24 * 30}; Path=/; ${secure}SameSite=Lax`;
 }
 
 function clearAuthToken() {
   state.token = null;
   localStorage.removeItem('auth_token');
-  document.cookie = 'ddrv_token=; Max-Age=0; Path=/; SameSite=Lax';
+  const secure = location.protocol === 'https:' ? 'Secure; ' : '';
+  document.cookie = `ddrv_token=; Max-Age=0; Path=/; ${secure}SameSite=Lax`;
 }
 
 function humanReadableSize(bytes, si = false, dp = 1) {
@@ -776,9 +777,16 @@ const card = document.createElement('div');
     setProgress(100);
 
     if (streamSave && writer) {
-      await writer.close();
-      writer = null; // Clear writer to prevent abort in finally block
-      showSnack('Download saved');
+      try {
+        await writer.close();
+        writer = null; // Clear writer to prevent abort in finally block
+        showSnack('Download saved');
+      } catch (closeErr) {
+        // Close failed - the file might still be partially written
+        writer = null;
+        console.error('Writer close failed:', closeErr);
+        showSnack('Download may be incomplete - check file', 'error');
+      }
     } else {
       // Reconstruct the file as a Blob and trigger the browser's Save dialog with
       // the correct filename (not the UUID used internally on Discord CDN).
