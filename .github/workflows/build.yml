@@ -62,6 +62,7 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Package binary + Cloudflare worker
+        shell: bash
         env:
           TARGET: ${{ matrix.target }}
           ARTIFACT_NAME: ${{ matrix.artifact_name }}

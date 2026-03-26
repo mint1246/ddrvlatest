@@ -863,6 +863,16 @@ body {
   white-space: nowrap;
   flex: 1;
 }
+.upload-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--md-sys-color-on-surface-variant);
+  margin-top: -4px;
+  margin-bottom: 8px;
+}
+.upload-speed, .upload-eta { white-space: nowrap; }
 .upload-pct {
   font-size: 12px;
   font-weight: 600;

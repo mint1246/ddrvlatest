@@ -636,26 +636,53 @@ async function downloadFile(file) {
       '<div class="upload-filename">' + escHtml(file.name) + '</div>' +
       '<div class="upload-pct">0%</div>' +
     '</div>' +
+    '<div class="upload-meta">' +
+      '<span class="upload-speed">—</span>' +
+      '<span class="upload-eta">--:--</span>' +
+    '</div>' +
     '<div class="progress-track"><div class="progress-fill" style="width:0%"></div></div>';
   progressContainer.classList.remove('hidden');
   progressContainer.appendChild(card);
 
   const pctEl  = card.querySelector('.upload-pct');
   const fillEl = card.querySelector('.progress-fill');
+  const speedEl = card.querySelector('.upload-speed');
+  const etaEl = card.querySelector('.upload-eta');
 
   function setProgress(pct) {
     if (pctEl)  pctEl.textContent  = Math.round(pct) + '%';
     if (fillEl) fillEl.style.width = Math.round(pct) + '%';
   }
 
+  function formatDuration(seconds) {
+    const s = Math.max(0, Math.round(seconds));
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const r = s % 60;
+    if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(r).padStart(2, '0')}`;
+    return `${m}:${String(r).padStart(2, '0')}`;
+  }
+
   try {
     const buffers = [];
     let offset       = 0;
     let totalChunks  = null;
+    let totalBytes   = file.rawSize || file.size || 0;
+    let downloaded   = 0;
     // Track how many individual chunks have completed so progress is smooth.
     let doneChunks   = 0;
     let lastName     = file.name;
     let lastMime     = 'application/octet-stream';
+    const startedAt  = performance.now();
+
+    function updateStats() {
+      const elapsedSec = (performance.now() - startedAt) / 1000;
+      const speed = elapsedSec > 0 ? downloaded / elapsedSec : 0;
+      if (speedEl) speedEl.textContent = speed > 0 ? humanReadableSize(speed, true, 1) + '/s' : '—';
+      const remaining = Math.max(0, totalBytes - downloaded);
+      const eta = speed > 0 ? formatDuration(remaining / speed) : '--:--';
+      if (etaEl) etaEl.textContent = eta;
+    }
 
     // Fetch chunk URLs in batches to limit Discord URL-refresh API calls.
     do {
@@ -670,6 +697,7 @@ async function downloadFile(file) {
         totalChunks = manifest.total_chunks;
         lastName    = manifest.name || file.name;
         lastMime    = manifest.mime || 'application/octet-stream';
+        totalBytes  = manifest.size || totalBytes;
       }
 
       // Download each chunk in this batch directly from Discord CDN in parallel.
@@ -677,8 +705,11 @@ async function downloadFile(file) {
       const chunkBuffers = await Promise.all(
         manifest.chunks.map(function(chunk) {
           return fetchChunkBuffer(chunk).then(function(buf) {
+            const chunkBytes = chunk?.size || buf.byteLength || 0;
+            downloaded += chunkBytes;
             doneChunks++;
             setProgress(totalChunks > 0 ? (doneChunks / totalChunks) * 100 : 0);
+            updateStats();
             return buf;
           });
         })
