@@ -182,14 +182,14 @@ function setAuthToken(token) {
   state.token = token;
   localStorage.setItem('auth_token', token);
   const secure = location.protocol === 'https:' ? '; Secure' : '';
-  // Use SameSite=Strict for better persistence across refreshes
-  document.cookie = `ddrv_token=${encodeURIComponent(token)}; Max-Age=${60 * 60 * 24 * 30}; Path=/; SameSite=Strict${secure}`;
+  // Use SameSite=Lax for better compatibility; Secure only on HTTPS
+  document.cookie = `ddrv_token=${encodeURIComponent(token)}; Max-Age=${60 * 60 * 24 * 30}; Path=/${secure}; SameSite=Lax`;
 }
 
 function clearAuthToken() {
   state.token = null;
   localStorage.removeItem('auth_token');
-  document.cookie = 'ddrv_token=; Max-Age=0; Path=/; SameSite=Strict';
+  document.cookie = 'ddrv_token=; Max-Age=0; Path=/; SameSite=Lax';
 }
 
 function humanReadableSize(bytes, si = false, dp = 1) {
@@ -777,6 +777,7 @@ const card = document.createElement('div');
 
     if (streamSave && writer) {
       await writer.close();
+      writer = null; // Clear writer to prevent abort in finally block
       showSnack('Download saved');
     } else {
       // Reconstruct the file as a Blob and trigger the browser's Save dialog with
@@ -790,6 +791,7 @@ const card = document.createElement('div');
       a.click();
       document.body.removeChild(a);
       setTimeout(function() { URL.revokeObjectURL(blobUrl); }, BLOB_URL_REVOKE_DELAY_MS);
+      showSnack('Download started');
     }
 
     setTimeout(function() { card.remove(); }, 1500);
@@ -807,6 +809,7 @@ const card = document.createElement('div');
       }
     }, 4000);
   } finally {
+    // Only abort if writer exists and wasn't successfully closed
     if (writer) {
       try { await writer.abort(); } catch (_) { /* ignore */ }
     }
