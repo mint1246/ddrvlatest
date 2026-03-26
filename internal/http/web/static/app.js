@@ -647,7 +647,7 @@ async function downloadFile(file) {
   const cardId = 'dl-' + file.id;
 
   // Build a download-progress card reusing the upload-card styles.
-  const card = document.createElement('div');
+const card = document.createElement('div');
   card.className = 'upload-card';
   card.id = cardId;
   card.innerHTML =
@@ -658,6 +658,7 @@ async function downloadFile(file) {
     '<div class="upload-meta">' +
       '<span class="upload-speed">—</span>' +
       '<span class="upload-eta">--:--</span>' +
+      '<span class="upload-elapsed">0:00</span>' +
     '</div>' +
     '<div class="progress-track"><div class="progress-fill" style="width:0%"></div></div>';
   progressContainer.classList.remove('hidden');
@@ -667,6 +668,7 @@ async function downloadFile(file) {
   const fillEl = card.querySelector('.progress-fill');
   const speedEl = card.querySelector('.upload-speed');
   const etaEl = card.querySelector('.upload-eta');
+  const elapsedEl = card.querySelector('.upload-elapsed');
 
   function setProgress(pct) {
     if (pctEl)  pctEl.textContent  = Math.round(pct) + '%';
@@ -696,6 +698,7 @@ async function downloadFile(file) {
     let writer       = null;
     let streamSave   = false;
     let saveFailed   = false;
+    let flushQueue   = [];
 
     // Stream directly to disk when supported to avoid large in-memory buffers.
     if (window.showSaveFilePicker) {
@@ -717,6 +720,7 @@ async function downloadFile(file) {
       const remaining = Math.max(0, totalBytes - downloaded);
       const eta = speed > 0 ? formatDuration(remaining / speed) : '--:--';
       if (etaEl) etaEl.textContent = eta;
+      if (elapsedEl) elapsedEl.textContent = formatDuration(elapsedSec);
     }
 
     // Fetch chunk URLs in batches to limit Discord URL-refresh API calls.
@@ -737,30 +741,38 @@ async function downloadFile(file) {
 
       // Download each chunk in this batch directly from Discord CDN in parallel.
       // Update progress as each individual chunk completes for a smooth bar.
-      const chunkBuffers = await Promise.all(
-        manifest.chunks.map(function(chunk) {
-          return fetchChunkBuffer(chunk).then(async function(buf) {
-            const chunkBytes = chunk?.size || buf.byteLength || 0;
-            downloaded += chunkBytes;
-            doneChunks++;
-            setProgress(totalChunks > 0 ? (doneChunks / totalChunks) * 100 : 0);
-            updateStats();
+      const chunkBuffers = [];
+      for (const chunk of manifest.chunks) {
+        const buf = await fetchChunkBuffer(chunk);
+        const chunkBytes = chunk?.size || buf.byteLength || 0;
+        downloaded += chunkBytes;
+        doneChunks++;
+        setProgress(totalChunks > 0 ? (doneChunks / totalChunks) * 100 : 0);
+        updateStats();
 
-            if (streamSave && writer && !saveFailed) {
-              try {
-                await writer.write(new Uint8Array(buf));
-              } catch (e) {
-                saveFailed = true;
-                buffers.push(buf);
-              }
-            } else {
+        if (streamSave && writer && !saveFailed) {
+          // enqueue writes to avoid overwhelming the writer with parallel promises
+          flushQueue.push((async () => {
+            try {
+              await writer.write(new Uint8Array(buf));
+            } catch (_) {
+              saveFailed = true;
               buffers.push(buf);
             }
-            return buf;
-          });
-        })
-      );
-
+          })());
+          if (flushQueue.length > 4) {
+            await Promise.all(flushQueue);
+            flushQueue = [];
+          }
+        } else {
+          buffers.push(buf);
+        }
+        chunkBuffers.push(buf);
+      }
+      if (flushQueue.length) {
+        await Promise.all(flushQueue);
+        flushQueue = [];
+      }
       offset += manifest.chunks.length;
     } while (offset < totalChunks);
 
@@ -1109,8 +1121,7 @@ async function initApp() {
       await api.checkToken();
       state.authenticated = true;
     } catch {
-      state.token = null;
-      localStorage.removeItem('auth_token');
+      clearAuthToken();
       if (state.config.login && !state.config.anonymous) {
         openDialog('login-dialog');
       }
