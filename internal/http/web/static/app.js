@@ -6,10 +6,19 @@
 /* ══════════════════════════════════════════════════════════
    State
 ═══════════════════════════════════════════════════════════ */
+function readTokenFromCookie() {
+  const entry = document.cookie
+    .split(';')
+    .map(s => s.trim())
+    .find(c => c.startsWith('ddrv_token='));
+  if (!entry) return null;
+  return decodeURIComponent(entry.split('=')[1] || '');
+}
+
 const state = {
   config: { login: false, anonymous: true },
   authenticated: false,
-  token: localStorage.getItem('auth_token') || null,
+  token: localStorage.getItem('auth_token') || readTokenFromCookie() || null,
   directory: { id: 'root', name: '/', files: [], parent: null },
   breadcrumbs: [{ id: 'root', name: 'Home' }],
   selected: new Set(),   // ids
@@ -62,14 +71,12 @@ const api = {
     });
     const token = res?.data?.token;
     if (!token) throw new Error('Invalid login response');
-    state.token = token;
-    localStorage.setItem('auth_token', token);
+    setAuthToken(token);
     return token;
   },
 
   logout() {
-    state.token = null;
-    localStorage.removeItem('auth_token');
+    clearAuthToken();
   },
 
   async getDir(id) {
@@ -171,6 +178,18 @@ const api = {
 /* ══════════════════════════════════════════════════════════
    Helpers
 ═══════════════════════════════════════════════════════════ */
+function setAuthToken(token) {
+  state.token = token;
+  localStorage.setItem('auth_token', token);
+  document.cookie = `ddrv_token=${encodeURIComponent(token)}; Max-Age=${60 * 60 * 24 * 30}; Path=/; SameSite=Lax`;
+}
+
+function clearAuthToken() {
+  state.token = null;
+  localStorage.removeItem('auth_token');
+  document.cookie = 'ddrv_token=; Max-Age=0; Path=/; SameSite=Lax';
+}
+
 function humanReadableSize(bytes, si = false, dp = 1) {
   const thresh = si ? 1000 : 1024;
   if (Math.abs(bytes) < thresh) return bytes + ' B';
@@ -674,6 +693,22 @@ async function downloadFile(file) {
     let lastName     = file.name;
     let lastMime     = 'application/octet-stream';
     const startedAt  = performance.now();
+    let writer       = null;
+    let streamSave   = false;
+    let saveFailed   = false;
+
+    // Stream directly to disk when supported to avoid large in-memory buffers.
+    if (window.showSaveFilePicker) {
+      try {
+        const handle = await window.showSaveFilePicker({
+          suggestedName: file.name || 'download',
+        });
+        writer = await handle.createWritable();
+        streamSave = true;
+      } catch (err) {
+        streamSave = false; // user cancelled or API blocked; fall back to blob
+      }
+    }
 
     function updateStats() {
       const elapsedSec = (performance.now() - startedAt) / 1000;
@@ -704,34 +739,49 @@ async function downloadFile(file) {
       // Update progress as each individual chunk completes for a smooth bar.
       const chunkBuffers = await Promise.all(
         manifest.chunks.map(function(chunk) {
-          return fetchChunkBuffer(chunk).then(function(buf) {
+          return fetchChunkBuffer(chunk).then(async function(buf) {
             const chunkBytes = chunk?.size || buf.byteLength || 0;
             downloaded += chunkBytes;
             doneChunks++;
             setProgress(totalChunks > 0 ? (doneChunks / totalChunks) * 100 : 0);
             updateStats();
+
+            if (streamSave && writer && !saveFailed) {
+              try {
+                await writer.write(new Uint8Array(buf));
+              } catch (e) {
+                saveFailed = true;
+                buffers.push(buf);
+              }
+            } else {
+              buffers.push(buf);
+            }
             return buf;
           });
         })
       );
 
-      buffers.push.apply(buffers, chunkBuffers);
       offset += manifest.chunks.length;
     } while (offset < totalChunks);
 
     setProgress(100);
 
-    // Reconstruct the file as a Blob and trigger the browser's Save dialog with
-    // the correct filename (not the UUID used internally on Discord CDN).
-    const blob    = new Blob(buffers, { type: lastMime });
-    const blobUrl = URL.createObjectURL(blob);
-    const a       = document.createElement('a');
-    a.href        = blobUrl;
-    a.download    = lastName;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    setTimeout(function() { URL.revokeObjectURL(blobUrl); }, BLOB_URL_REVOKE_DELAY_MS);
+    if (streamSave && writer && !saveFailed) {
+      await writer.close();
+      showSnack('Download saved');
+    } else {
+      // Reconstruct the file as a Blob and trigger the browser's Save dialog with
+      // the correct filename (not the UUID used internally on Discord CDN).
+      const blob    = new Blob(buffers, { type: lastMime });
+      const blobUrl = URL.createObjectURL(blob);
+      const a       = document.createElement('a');
+      a.href        = blobUrl;
+      a.download    = lastName;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(function() { URL.revokeObjectURL(blobUrl); }, BLOB_URL_REVOKE_DELAY_MS);
+    }
 
     setTimeout(function() { card.remove(); }, 1500);
     if (progressContainer.children.length === 0) {
@@ -747,6 +797,8 @@ async function downloadFile(file) {
         progressContainer.classList.add('hidden');
       }
     }, 4000);
+  } finally {
+    try { await writer?.abort(); } catch (_) { /* ignore */ }
   }
 }
 
