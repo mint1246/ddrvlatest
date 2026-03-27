@@ -78,6 +78,12 @@ impl Driver {
         reader::Reader::new(chunks, pos, Arc::clone(&self.rest))
     }
 
+    /// Number of chunks to pre-renew in the background per manifest request.
+    /// Scales linearly with token count: 10 chunks per token.
+    pub fn manifest_prefetch_window(&self) -> usize {
+        self.rest.num_tokens().saturating_mul(10).max(10)
+    }
+
     /// Refresh any chunks whose CDN URL has expired.
     /// Uses all available bot tokens in rotation to distribute rate limit load.
     pub async fn update_nodes(&self, chunks: &mut [Node]) -> Result<()> {

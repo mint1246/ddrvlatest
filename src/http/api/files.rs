@@ -344,6 +344,26 @@ pub async fn manifest_file_handler(
         (page, total, byte_offset)
     };
 
+    // Pre-renew upcoming chunks in the background so the next manifest page is
+    // faster. Scale the prefetch size with token count (10 chunks per token).
+    let next_offset = offset + page_nodes.len();
+    if next_offset < total_chunks {
+        let prefetch_limit = state.driver.manifest_prefetch_window();
+        let prefetch_id = id.clone();
+        tokio::spawn(async move {
+            let dp = dataprovider::get();
+            if let Err(e) = dp.get_nodes_paged(&prefetch_id, next_offset, prefetch_limit).await {
+                warn!(
+                    file_id = %prefetch_id,
+                    next_offset,
+                    prefetch_limit,
+                    error = %e,
+                    "manifest background prefetch failed"
+                );
+            }
+        });
+    }
+
     // Validate links before returning them in the manifest. If probes fail, force
     // renewals and retry. If some are still failing, continue with best-effort
     // renewed links instead of hard-failing the whole manifest request.

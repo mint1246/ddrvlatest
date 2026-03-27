@@ -53,6 +53,10 @@ impl Rest {
         self.channels.len()
     }
 
+    pub fn num_tokens(&self) -> usize {
+        self.tokens.len()
+    }
+
     fn token(&self) -> &str {
         let idx = self.last_token_idx.fetch_add(1, Ordering::Relaxed) % self.tokens.len();
         &self.tokens[idx]
