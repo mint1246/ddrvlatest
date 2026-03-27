@@ -10,7 +10,7 @@ use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use std::{sync::{Arc, Mutex, OnceLock}, time::Duration};
 use tokio_util::io::ReaderStream;
-use tracing::warn;
+use tracing::{info, warn};
 
 use super::types::{err, ApiResponse, UpdateFileRequest};
 use crate::{
@@ -232,49 +232,75 @@ fn manifest_probe_client() -> &'static reqwest::Client {
 
 /// Lightweight URL probe: fetch only the first byte to confirm the URL is alive.
 /// This avoids downloading full chunks while still ensuring the link is not 404.
-async fn probe_manifest_url(url: &str) -> bool {
-    let mut res = match manifest_probe_client()
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProbeOutcome {
+    Healthy,
+    HardInvalid,
+    Transient,
+}
+
+async fn probe_manifest_url(url: &str) -> ProbeOutcome {
+    let res = match manifest_probe_client()
         .get(url)
         .header(reqwest::header::RANGE, "bytes=0-0")
         .send()
         .await
     {
         Ok(r) => r,
-        Err(_) => return false,
+        Err(_) => return ProbeOutcome::Transient,
     };
 
     let status = res.status();
-    if status == reqwest::StatusCode::NOT_FOUND {
-        return false;
-    }
-    if !(status.is_success() || status == reqwest::StatusCode::PARTIAL_CONTENT) {
-        return false;
+    if status == reqwest::StatusCode::NOT_FOUND
+        || status == reqwest::StatusCode::FORBIDDEN
+        || status == reqwest::StatusCode::UNAUTHORIZED
+    {
+        return ProbeOutcome::HardInvalid;
     }
 
-    matches!(res.chunk().await, Ok(Some(bytes)) if !bytes.is_empty())
+    if status == reqwest::StatusCode::PARTIAL_CONTENT || status.is_success() {
+        return ProbeOutcome::Healthy;
+    }
+
+    ProbeOutcome::Transient
+}
+
+#[derive(Default, Clone, Copy, Debug)]
+struct ValidationSummary {
+    hard_invalid_remaining: usize,
+    transient_failures: usize,
 }
 
 /// Validate canonical chunk URLs and renew any that fail a lightweight probe.
-/// Retries renewal a few times and returns whether all chunk URLs became healthy.
-async fn ensure_manifest_nodes_valid(state: &AppState, nodes: &mut [Node]) -> bool {
+/// Retries renewal a few times and returns a summary of what still failed.
+async fn ensure_manifest_nodes_valid(state: &AppState, nodes: &mut [Node]) -> ValidationSummary {
     const MAX_RENEW_ATTEMPTS: usize = 3;
+    let mut last_summary = ValidationSummary::default();
 
     for attempt in 1..=MAX_RENEW_ATTEMPTS {
-        let mut invalid: Vec<usize> = Vec::new();
+        let mut hard_invalid: Vec<usize> = Vec::new();
+        let mut transient = 0usize;
 
         for (idx, n) in nodes.iter().enumerate() {
             let url = encode_attachment_url(&n.url, n.ex, n.is, &n.hm);
-            if !probe_manifest_url(&url).await {
-                invalid.push(idx);
+            match probe_manifest_url(&url).await {
+                ProbeOutcome::Healthy => {}
+                ProbeOutcome::HardInvalid => hard_invalid.push(idx),
+                ProbeOutcome::Transient => transient += 1,
             }
         }
 
-        if invalid.is_empty() {
-            return true;
+        last_summary = ValidationSummary {
+            hard_invalid_remaining: hard_invalid.len(),
+            transient_failures: transient,
+        };
+
+        if hard_invalid.is_empty() {
+            return last_summary;
         }
 
         // Force a refresh for failing nodes by marking them expired for this pass.
-        for idx in &invalid {
+        for idx in &hard_invalid {
             nodes[*idx].ex = 0;
         }
 
@@ -283,7 +309,7 @@ async fn ensure_manifest_nodes_valid(state: &AppState, nodes: &mut [Node]) -> bo
         }
     }
 
-    false
+    last_summary
 }
 
 /// GET /files/:id/manifest  (no auth)
@@ -350,16 +376,57 @@ pub async fn manifest_file_handler(
     if next_offset < total_chunks {
         let prefetch_limit = state.driver.manifest_prefetch_window();
         let prefetch_id = id.clone();
+        let prefetch_end = (next_offset + prefetch_limit).min(total_chunks);
+        let start_pct = if total_chunks > 0 {
+            ((next_offset as f64 * 100.0) / total_chunks as f64).round() as usize
+        } else {
+            0
+        };
+        let end_pct = if total_chunks > 0 {
+            ((prefetch_end as f64 * 100.0) / total_chunks as f64).round() as usize
+        } else {
+            0
+        };
+
+        info!(
+            file_id = %prefetch_id,
+            next_offset,
+            prefetch_limit,
+            prefetch_end,
+            total_chunks,
+            start_pct,
+            end_pct,
+            "manifest background prefetch scheduled"
+        );
+
         tokio::spawn(async move {
             let dp = dataprovider::get();
-            if let Err(e) = dp.get_nodes_paged(&prefetch_id, next_offset, prefetch_limit).await {
-                warn!(
-                    file_id = %prefetch_id,
-                    next_offset,
-                    prefetch_limit,
-                    error = %e,
-                    "manifest background prefetch failed"
-                );
+            match dp.get_nodes_paged(&prefetch_id, next_offset, prefetch_limit).await {
+                Ok((nodes, total, _)) => {
+                    let done_end = (next_offset + nodes.len()).min(total);
+                    let done_pct = if total > 0 {
+                        ((done_end as f64 * 100.0) / total as f64).round() as usize
+                    } else {
+                        0
+                    };
+                    info!(
+                        file_id = %prefetch_id,
+                        next_offset,
+                        prefetched = nodes.len(),
+                        total_chunks = total,
+                        done_pct,
+                        "manifest background prefetch completed"
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        file_id = %prefetch_id,
+                        next_offset,
+                        prefetch_limit,
+                        error = %e,
+                        "manifest background prefetch failed"
+                    );
+                }
             }
         });
     }
@@ -367,8 +434,20 @@ pub async fn manifest_file_handler(
     // Validate links before returning them in the manifest. If probes fail, force
     // renewals and retry. If some are still failing, continue with best-effort
     // renewed links instead of hard-failing the whole manifest request.
-    if !ensure_manifest_nodes_valid(&state, &mut page_nodes).await {
-        warn!(file_id = %id, "manifest link validation still failing after renew attempts; returning best-effort links");
+    let validation = ensure_manifest_nodes_valid(&state, &mut page_nodes).await;
+    if validation.hard_invalid_remaining > 0 {
+        warn!(
+            file_id = %id,
+            hard_invalid_remaining = validation.hard_invalid_remaining,
+            transient_probe_failures = validation.transient_failures,
+            "manifest link validation still has hard-invalid links after renew attempts; returning best-effort links"
+        );
+    } else if validation.transient_failures > 0 {
+        info!(
+            file_id = %id,
+            transient_probe_failures = validation.transient_failures,
+            "manifest validation saw transient probe failures; continuing with renewed links"
+        );
     }
 
     // Build ChunkInfo entries, computing absolute byte offsets from byte_offset.
@@ -387,7 +466,7 @@ pub async fn manifest_file_handler(
 
         // Guarantee returned links are valid: if the preferred download URL fails,
         // fall back to the canonical URL that was already validated above.
-        let download_url = if probe_manifest_url(&preferred).await {
+        let download_url = if probe_manifest_url(&preferred).await == ProbeOutcome::Healthy {
             preferred
         } else {
             url.clone()
