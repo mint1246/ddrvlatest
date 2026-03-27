@@ -47,13 +47,25 @@ const api = {
       headers: this._headers(),
       ...opts,
     });
+
+    const parseBody = async () => {
+      const text = await res.text();
+      if (!text) return {};
+      try {
+        return JSON.parse(text);
+      } catch {
+        return { message: text };
+      }
+    };
+
     if (!res.ok) {
-      const body = await res.json().catch(() => ({ message: res.statusText }));
+      const body = await parseBody();
       const err = new Error(body.message || res.statusText);
       err.status = res.status;
       throw err;
     }
-    return res.json();
+
+    return parseBody();
   },
 
   async getConfig() {

@@ -12,6 +12,11 @@ use serde::{Deserialize, Serialize};
 use super::types::{err, ApiResponse, AuthConfigResponse, LoginRequest, TokenResponse};
 use crate::http::AppState;
 
+#[derive(Serialize)]
+struct CheckTokenResponse {
+    valid: bool,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
     iat: i64,
@@ -56,7 +61,7 @@ pub async fn auth_config_handler(State(state): State<AppState>) -> impl IntoResp
 }
 
 pub async fn check_token_handler() -> impl IntoResponse {
-    StatusCode::OK
+    ApiResponse::ok(CheckTokenResponse { valid: true })
 }
 
 pub async fn auth_middleware(
