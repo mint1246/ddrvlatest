@@ -10,6 +10,7 @@ use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use std::{sync::{Arc, Mutex, OnceLock}, time::Duration};
 use tokio_util::io::ReaderStream;
+use tracing::warn;
 
 use super::types::{err, ApiResponse, UpdateFileRequest};
 use crate::{
@@ -254,38 +255,35 @@ async fn probe_manifest_url(url: &str) -> bool {
 }
 
 /// Validate canonical chunk URLs and renew any that fail a lightweight probe.
-/// Returns `true` only when all canonical URLs are valid after at most one renew pass.
+/// Retries renewal a few times and returns whether all chunk URLs became healthy.
 async fn ensure_manifest_nodes_valid(state: &AppState, nodes: &mut [Node]) -> bool {
-    let mut invalid: Vec<usize> = Vec::new();
+    const MAX_RENEW_ATTEMPTS: usize = 3;
 
-    for (idx, n) in nodes.iter().enumerate() {
-        let url = encode_attachment_url(&n.url, n.ex, n.is, &n.hm);
-        if !probe_manifest_url(&url).await {
-            invalid.push(idx);
+    for attempt in 1..=MAX_RENEW_ATTEMPTS {
+        let mut invalid: Vec<usize> = Vec::new();
+
+        for (idx, n) in nodes.iter().enumerate() {
+            let url = encode_attachment_url(&n.url, n.ex, n.is, &n.hm);
+            if !probe_manifest_url(&url).await {
+                invalid.push(idx);
+            }
+        }
+
+        if invalid.is_empty() {
+            return true;
+        }
+
+        // Force a refresh for failing nodes by marking them expired for this pass.
+        for idx in &invalid {
+            nodes[*idx].ex = 0;
+        }
+
+        if let Err(e) = state.driver.update_nodes(nodes).await {
+            warn!(attempt, error = %e, "manifest node renewal attempt failed");
         }
     }
 
-    if invalid.is_empty() {
-        return true;
-    }
-
-    // Force a refresh for failing nodes by marking them expired for this pass.
-    for idx in &invalid {
-        nodes[*idx].ex = 0;
-    }
-
-    if state.driver.update_nodes(nodes).await.is_err() {
-        return false;
-    }
-
-    for n in nodes.iter() {
-        let url = encode_attachment_url(&n.url, n.ex, n.is, &n.hm);
-        if !probe_manifest_url(&url).await {
-            return false;
-        }
-    }
-
-    true
+    false
 }
 
 /// GET /files/:id/manifest  (no auth)
@@ -346,13 +344,11 @@ pub async fn manifest_file_handler(
         (page, total, byte_offset)
     };
 
-    // Validate links before returning them in the manifest. If a URL fails, force
-    // one renew pass and only continue if the renewed URLs are healthy.
+    // Validate links before returning them in the manifest. If probes fail, force
+    // renewals and retry. If some are still failing, continue with best-effort
+    // renewed links instead of hard-failing the whole manifest request.
     if !ensure_manifest_nodes_valid(&state, &mut page_nodes).await {
-        return err(
-            StatusCode::BAD_GATEWAY,
-            "failed to validate chunk links after renewal",
-        );
+        warn!(file_id = %id, "manifest link validation still failing after renew attempts; returning best-effort links");
     }
 
     // Build ChunkInfo entries, computing absolute byte offsets from byte_offset.
