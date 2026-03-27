@@ -155,6 +155,25 @@ impl Rest {
         Ok(())
     }
 
+    /// Fetch a single message by exact message ID.
+    pub async fn get_message(&self, channel_id: &str, message_id: i64) -> Result<Message> {
+        let path_suffix = format!("/{}/messages", channel_id);
+        let url = format!("{}/channels/{}/messages/{}", BASE_URL, channel_id, message_id);
+
+        let resp = self.do_req(&path_suffix, |c, _t| c.get(&url), true).await?;
+        let status = resp.status().as_u16();
+        if status != 200 {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(DdrvError::DiscordApi {
+                expected: 200,
+                got: status,
+                body,
+            });
+        }
+
+        Ok(resp.json().await?)
+    }
+
     /// Upload `data` as a Discord message attachment, returning the resulting Node.
     pub async fn create_attachment(&self, data: Bytes) -> Result<Node> {
         if self.nitro {
@@ -372,29 +391,19 @@ impl Rest {
             // CDN URLs can become invalid before `ex`; renew once and retry.
             if status == 404 && !refreshed_once {
                 let channel_id = extract_channel_id(&node.url);
-                let mut messages = Vec::new();
-
-                match self
-                    .get_messages(&channel_id, node.mid - 1, "after", &mut messages)
-                    .await
-                {
-                    Ok(()) => {
-                        if let Some(msg) = messages
-                            .into_iter()
-                            .find(|m| m.id.parse::<i64>().ok() == Some(node.mid))
-                        {
-                            if let Some(att) = msg.attachments.first() {
-                                let (new_url, ex, is, hm) = decode_attachment_url(&att.url);
-                                url = encode_attachment_url(&new_url, ex, is, &hm);
-                                refreshed_once = true;
-                                attempt += 1;
-                                warn!(
-                                    message_id = node.mid,
-                                    channel_id,
-                                    "Discord CDN URL returned 404; renewed and retrying attachment read"
-                                );
-                                continue;
-                            }
+                match self.get_message(&channel_id, node.mid).await {
+                    Ok(msg) => {
+                        if let Some(att) = msg.attachments.first() {
+                            let (new_url, ex, is, hm) = decode_attachment_url(&att.url);
+                            url = encode_attachment_url(&new_url, ex, is, &hm);
+                            refreshed_once = true;
+                            attempt += 1;
+                            warn!(
+                                message_id = node.mid,
+                                channel_id,
+                                "Discord CDN URL returned 404; renewed and retrying attachment read"
+                            );
+                            continue;
                         }
                     }
                     Err(e) => {

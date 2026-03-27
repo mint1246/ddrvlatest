@@ -122,20 +122,17 @@ impl Driver {
         let mut fetches = stream::iter(expired.into_iter().map(move |(mid, channel_id)| {
             let rest = Arc::clone(&rest);
             async move {
-                let mut messages = Vec::new();
-                rest.get_messages(&channel_id, mid - 1, "after", &mut messages)
-                    .await?;
-                Ok::<Vec<Message>, DdrvError>(messages)
+                let message = rest.get_message(&channel_id, mid).await?;
+                Ok::<Message, DdrvError>(message)
             }
         }))
         .buffer_unordered(concurrency);
 
         let mut messages_by_id: HashMap<i64, Message> = HashMap::new();
-        while let Some(messages) = fetches.next().await {
-            for msg in messages? {
-                if let Ok(mid) = msg.id.parse::<i64>() {
-                    messages_by_id.insert(mid, msg);
-                }
+        while let Some(message) = fetches.next().await {
+            let msg = message?;
+            if let Ok(mid) = msg.id.parse::<i64>() {
+                messages_by_id.insert(mid, msg);
             }
         }
 
