@@ -8,7 +8,7 @@ use axum::{
 use chrono::Utc;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex};
+use std::{sync::{Arc, Mutex, OnceLock}, time::Duration};
 use tokio_util::io::ReaderStream;
 
 use super::types::{err, ApiResponse, UpdateFileRequest};
@@ -217,6 +217,77 @@ fn discord_cdn_download_url(url: &str, proxy_base: Option<&str>) -> String {
     with_download
 }
 
+fn manifest_probe_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(3))
+            .timeout(Duration::from_secs(8))
+            .redirect(reqwest::redirect::Policy::limited(3))
+            .build()
+            .expect("manifest probe client build failed")
+    })
+}
+
+/// Lightweight URL probe: fetch only the first byte to confirm the URL is alive.
+/// This avoids downloading full chunks while still ensuring the link is not 404.
+async fn probe_manifest_url(url: &str) -> bool {
+    let mut res = match manifest_probe_client()
+        .get(url)
+        .header(reqwest::header::RANGE, "bytes=0-0")
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(_) => return false,
+    };
+
+    let status = res.status();
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return false;
+    }
+    if !(status.is_success() || status == reqwest::StatusCode::PARTIAL_CONTENT) {
+        return false;
+    }
+
+    matches!(res.chunk().await, Ok(Some(bytes)) if !bytes.is_empty())
+}
+
+/// Validate canonical chunk URLs and renew any that fail a lightweight probe.
+/// Returns `true` only when all canonical URLs are valid after at most one renew pass.
+async fn ensure_manifest_nodes_valid(state: &AppState, nodes: &mut [Node]) -> bool {
+    let mut invalid: Vec<usize> = Vec::new();
+
+    for (idx, n) in nodes.iter().enumerate() {
+        let url = encode_attachment_url(&n.url, n.ex, n.is, &n.hm);
+        if !probe_manifest_url(&url).await {
+            invalid.push(idx);
+        }
+    }
+
+    if invalid.is_empty() {
+        return true;
+    }
+
+    // Force a refresh for failing nodes by marking them expired for this pass.
+    for idx in &invalid {
+        nodes[*idx].ex = 0;
+    }
+
+    if state.driver.update_nodes(nodes).await.is_err() {
+        return false;
+    }
+
+    for n in nodes.iter() {
+        let url = encode_attachment_url(&n.url, n.ex, n.is, &n.hm);
+        if !probe_manifest_url(&url).await {
+            return false;
+        }
+    }
+
+    true
+}
+
 /// GET /files/:id/manifest  (no auth)
 ///
 /// Returns a JSON manifest listing authenticated Discord CDN chunk URLs with
@@ -249,7 +320,7 @@ pub async fn manifest_file_handler(
 
     let offset = query.offset.unwrap_or(0);
 
-    let (page_nodes, total_chunks, byte_offset) = if let Some(limit) = query.limit {
+    let (mut page_nodes, total_chunks, byte_offset) = if let Some(limit) = query.limit {
         // Paginated: only refresh nodes in the requested range.
         match dp.get_nodes_paged(&id, offset, limit).await {
             Ok(result) => result,
@@ -275,29 +346,45 @@ pub async fn manifest_file_handler(
         (page, total, byte_offset)
     };
 
+    // Validate links before returning them in the manifest. If a URL fails, force
+    // one renew pass and only continue if the renewed URLs are healthy.
+    if !ensure_manifest_nodes_valid(&state, &mut page_nodes).await {
+        return err(
+            StatusCode::BAD_GATEWAY,
+            "failed to validate chunk links after renewal",
+        );
+    }
+
     // Build ChunkInfo entries, computing absolute byte offsets from byte_offset.
     // This mirrors the offset arithmetic in `ddrv::reader::Reader::new` so that
     // clients can use `Range: bytes={start}-{end}` when fetching individual chunks.
     let mut running_offset = byte_offset;
-    let chunks: Vec<ChunkInfo> = page_nodes
-        .iter()
-        .map(|n| {
-            let start = running_offset;
-            let size = n.size as u64;
-            let end = running_offset + size - 1;
-            running_offset = end + 1;
-            let url = encode_attachment_url(&n.url, n.ex, n.is, &n.hm);
-            let download_url =
-                discord_cdn_download_url(&url, state.config.cdn_proxy_base.as_deref());
-            ChunkInfo {
-                url,
-                download_url,
-                start,
-                end,
-                size,
-            }
-        })
-        .collect();
+    let mut chunks: Vec<ChunkInfo> = Vec::with_capacity(page_nodes.len());
+    for n in &page_nodes {
+        let start = running_offset;
+        let size = n.size as u64;
+        let end = running_offset + size - 1;
+        running_offset = end + 1;
+
+        let url = encode_attachment_url(&n.url, n.ex, n.is, &n.hm);
+        let preferred = discord_cdn_download_url(&url, state.config.cdn_proxy_base.as_deref());
+
+        // Guarantee returned links are valid: if the preferred download URL fails,
+        // fall back to the canonical URL that was already validated above.
+        let download_url = if probe_manifest_url(&preferred).await {
+            preferred
+        } else {
+            url.clone()
+        };
+
+        chunks.push(ChunkInfo {
+            url,
+            download_url,
+            start,
+            end,
+            size,
+        });
+    }
 
     let manifest = FileManifest {
         id: file.id.clone(),
