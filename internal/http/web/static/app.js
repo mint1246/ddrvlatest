@@ -597,6 +597,12 @@ const MANIFEST_BATCH = 5;
 // it can be revoked; 30 s is ample even on slow devices.
 const BLOB_URL_REVOKE_DELAY_MS = 30000;
 const DISCORD_CDN_HOSTS = ['cdn.discordapp.com'];
+const CHUNK_RENEW_MAX_ATTEMPTS = 12;
+const CHUNK_RENEW_RETRY_MS = 250;
+
+function sleep(ms) {
+  return new Promise(function(resolve) { setTimeout(resolve, ms); });
+}
 
 function buildChunkUrlCandidates(chunk) {
   const urls = [];
@@ -639,11 +645,15 @@ function buildChunkUrlCandidates(chunk) {
 async function fetchChunkBuffer(chunk) {
   const candidates = buildChunkUrlCandidates(chunk);
   let lastErr = null;
+  let saw404 = false;
 
   for (const url of candidates) {
     try {
       const res = await fetch(url, { mode: 'cors', referrerPolicy: 'no-referrer' });
-      if (!res.ok) throw new Error('Chunk fetch failed: ' + res.status);
+      if (!res.ok) {
+        if (res.status === 404) saw404 = true;
+        throw new Error('Chunk fetch failed: ' + res.status);
+      }
       return await res.arrayBuffer();
     } catch (err) {
       console.warn('Chunk fetch failed, trying next host', url, err);
@@ -651,7 +661,45 @@ async function fetchChunkBuffer(chunk) {
     }
   }
 
+  if (saw404) {
+    const e = lastErr || new Error('Chunk fetch failed: 404');
+    e.is404 = true;
+    throw e;
+  }
+
   throw lastErr || new Error('Chunk fetch failed');
+}
+
+async function renewChunkFromManifest(fileId, chunkIndex) {
+  const renewOffset = Math.max(0, chunkIndex);
+  const renewUrl =
+    '/files/' + fileId + '/manifest' +
+    '?offset=' + renewOffset + '&limit=1';
+  const res = await fetch(renewUrl);
+  if (!res.ok) throw new Error('Chunk renew manifest failed: ' + res.status);
+  const manifest = await res.json();
+  if (!manifest || !Array.isArray(manifest.chunks) || manifest.chunks.length === 0) {
+    throw new Error('Chunk renew manifest returned no chunks');
+  }
+  return manifest.chunks[0];
+}
+
+async function fetchChunkBufferWithRenew(fileId, chunk, chunkIndex) {
+  let currentChunk = chunk;
+
+  for (let renewAttempt = 0; renewAttempt <= CHUNK_RENEW_MAX_ATTEMPTS; renewAttempt++) {
+    try {
+      return await fetchChunkBuffer(currentChunk);
+    } catch (err) {
+      if (!err || !err.is404) throw err;
+      if (renewAttempt >= CHUNK_RENEW_MAX_ATTEMPTS) throw err;
+
+      currentChunk = await renewChunkFromManifest(fileId, chunkIndex);
+      await sleep(CHUNK_RENEW_RETRY_MS);
+    }
+  }
+
+  throw new Error('Chunk fetch failed after renew retries');
 }
 
 async function downloadFile(file) {
@@ -758,16 +806,25 @@ const card = document.createElement('div');
         totalBytes  = manifest.size || totalBytes;
       }
 
-      // Download each chunk in this batch directly from Discord CDN in parallel.
-      // Update progress as each individual chunk completes for a smooth bar.
-      for (const chunk of manifest.chunks) {
-        const buf = await fetchChunkBuffer(chunk);
+      // Download chunks in this batch in parallel. We still assemble/write in
+      // original order so file contents remain correct.
+      const batchResults = new Array(manifest.chunks.length);
+      await Promise.all(manifest.chunks.map(async function(chunk, idxInBatch) {
+        const chunkIndex = offset + idxInBatch;
+        const buf = await fetchChunkBufferWithRenew(file.id, chunk, chunkIndex);
         const chunkBytes = chunk?.size || buf.byteLength || 0;
+
+        // Progress updates happen as each parallel chunk completes.
         downloaded += chunkBytes;
         doneChunks++;
         setProgress(totalChunks > 0 ? (doneChunks / totalChunks) * 100 : 0);
         updateStats();
 
+        batchResults[idxInBatch] = buf;
+      }));
+
+      for (let i = 0; i < batchResults.length; i++) {
+        const buf = batchResults[i];
         if (streamSave && writer) {
           // Write directly to disk without buffering
           try {
