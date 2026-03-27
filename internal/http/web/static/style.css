@@ -863,6 +863,17 @@ body {
   white-space: nowrap;
   flex: 1;
 }
+.upload-meta {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--md-sys-color-on-surface-variant);
+  margin-top: -4px;
+  margin-bottom: 8px;
+}
+.upload-speed, .upload-eta { white-space: nowrap; }
+.upload-elapsed { justify-self: end; white-space: nowrap; }
 .upload-pct {
   font-size: 12px;
   font-weight: 600;

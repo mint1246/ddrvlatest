@@ -6,6 +6,7 @@ use axum::{
     Json,
 };
 use chrono::Utc;
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use tokio_util::io::ReaderStream;
@@ -163,6 +164,9 @@ pub async fn delete_file_handler(
 pub struct ChunkInfo {
     /// Authenticated Discord CDN URL for this chunk (includes `ex`/`is`/`hm` params).
     pub url: String,
+    /// Same URL but with `download=1` to force raw CDN response headers.
+    /// Some Discord edges add more permissive CORS headers on download responses.
+    pub download_url: String,
     /// Start byte offset of this chunk within the complete file.
     pub start: u64,
     /// End byte offset (inclusive) of this chunk within the complete file.
@@ -194,6 +198,25 @@ pub struct ManifestQuery {
     pub limit: Option<usize>,
 }
 
+/// Append `download=1` to a Discord CDN URL, preserving existing query params.
+fn discord_cdn_download_url(url: &str, proxy_base: Option<&str>) -> String {
+    let mut parsed = match Url::parse(url) {
+        Ok(u) => u,
+        Err(_) => return url.to_string(),
+    };
+    parsed.query_pairs_mut().append_pair("download", "1");
+    let with_download = parsed.to_string();
+
+    if let Some(base) = proxy_base {
+        if let Ok(mut proxy) = Url::parse(base) {
+            proxy.query_pairs_mut().append_pair("url", &with_download);
+            return proxy.to_string();
+        }
+    }
+
+    with_download
+}
+
 /// GET /files/:id/manifest  (no auth)
 ///
 /// Returns a JSON manifest listing authenticated Discord CDN chunk URLs with
@@ -204,7 +227,7 @@ pub struct ManifestQuery {
 /// Supports pagination via `?offset=N&limit=K` to spread URL-refresh calls
 /// across multiple requests and avoid Discord API rate limits for large files.
 pub async fn manifest_file_handler(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Path(id): Path<String>,
     Query(query): Query<ManifestQuery>,
 ) -> Response {
@@ -263,8 +286,12 @@ pub async fn manifest_file_handler(
             let size = n.size as u64;
             let end = running_offset + size - 1;
             running_offset = end + 1;
+            let url = encode_attachment_url(&n.url, n.ex, n.is, &n.hm);
+            let download_url =
+                discord_cdn_download_url(&url, state.config.cdn_proxy_base.as_deref());
             ChunkInfo {
-                url: encode_attachment_url(&n.url, n.ex, n.is, &n.hm),
+                url,
+                download_url,
                 start,
                 end,
                 size,

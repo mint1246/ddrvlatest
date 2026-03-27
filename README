@@ -26,6 +26,13 @@ USAGE
 - Migrate old master BoltDB to rewrite redb with main binary:
   `./target/release/ddrv --migrate /path/to/legacy.db --migrate-output /path/to/new.redb`
 
+DISCORD CDN CORS WORKER
+-----------------------
+- Worker source: `cloudflare-worker/index.js` (config in `cloudflare-worker/wrangler.toml`).
+- Deploy with `wrangler publish` from that directory.
+- Configure ddrv to emit worker-backed URLs by setting `frontend.http.cdn_proxy_base` (or env `CDN_PROXY_BASE`, e.g. `https://your-worker.workers.dev/`).
+- Client usage: `https://<your-worker>.workers.dev/?url=https://cdn.discordapp.com/attachments/...` (manifest/download URLs include `download=1` automatically).
+
 USAGE DOCKER
 ------------
 - Build image: `docker build -t ddrv:latest .`

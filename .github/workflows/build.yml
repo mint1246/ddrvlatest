@@ -30,16 +30,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
       - name: Install ARM64 cross-compiler (Linux aarch64 only)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -47,9 +47,17 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: ${{ runner.os }}-${{ matrix.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-${{ matrix.os }}-${{ matrix.target }}-cargo-
+          key: ${{ runner.os }}-${{ matrix.target }}-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.target }}-registry-
+
+      - name: Cache build artifacts
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-${{ matrix.target }}-build-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.target }}-build-
 
       - name: Build release binary (aarch64)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
@@ -61,9 +69,42 @@ jobs:
         if: matrix.target != 'aarch64-unknown-linux-gnu'
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Upload artifact
+      - name: Package binary + Cloudflare worker
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          ARTIFACT_NAME: ${{ matrix.artifact_name }}
+          ASSET_NAME: ${{ matrix.asset_name }}
+        run: |
+          python - <<'PY'
+          import os, shutil, pathlib
+
+          root = pathlib.Path(".").resolve()
+          target = os.environ["TARGET"]
+          artifact_name = os.environ["ARTIFACT_NAME"]
+          asset_name = os.environ["ASSET_NAME"]
+
+          bin_path = root / "target" / target / "release" / artifact_name
+          if not bin_path.exists():
+              raise SystemExit(f"Binary not found: {bin_path}")
+
+          bundle_dir = root / "release_bundle"
+          shutil.rmtree(bundle_dir, ignore_errors=True)
+          bundle_dir.mkdir(parents=True, exist_ok=True)
+
+          shutil.copy2(bin_path, bundle_dir / artifact_name)
+          shutil.copytree(root / "cloudflare-worker", bundle_dir / "cloudflare-worker")
+
+          zip_path = root / f"{asset_name}.zip"
+          if zip_path.exists():
+              zip_path.unlink()
+          shutil.make_archive(zip_path.with_suffix(""), "zip", bundle_dir)
+          print(f"Created bundle: {zip_path}")
+          PY
+
+      - name: Upload bundled artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.asset_name }}
-          path: target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
+          name: ${{ matrix.asset_name }}-bundle
+          path: ${{ matrix.asset_name }}.zip
           if-no-files-found: error

@@ -79,6 +79,7 @@ impl Driver {
     }
 
     /// Refresh any chunks whose CDN URL has expired.
+    /// Uses all available bot tokens in rotation to distribute rate limit load.
     pub async fn update_nodes(&self, chunks: &mut [Node]) -> Result<()> {
         use crate::ddrv::utils::extract_channel_id;
         use futures::stream::{self, StreamExt};
@@ -109,6 +110,9 @@ impl Driver {
         }
 
         let rest = Arc::clone(&self.rest);
+        // Increase concurrency to leverage multiple tokens - this will automatically
+        // rotate through all available tokens, spreading the rate limit load.
+        let concurrency = (expired.len().min(16)).max(8);
         let mut fetches = stream::iter(expired.into_iter().map(move |(mid, channel_id)| {
             let rest = Arc::clone(&rest);
             async move {
@@ -118,7 +122,7 @@ impl Driver {
                 Ok::<Vec<Message>, DdrvError>(messages)
             }
         }))
-        .buffer_unordered(8);
+        .buffer_unordered(concurrency);
 
         let mut messages_by_id: HashMap<i64, Message> = HashMap::new();
         while let Some(messages) = fetches.next().await {
