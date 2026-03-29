@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>DDrv</title>
   <meta name="description" content="Infinite cloud storage powered by Discord">
-  <meta name="theme-color" content="#6750A4" id="meta-theme-color">
+  <meta name="theme-color" content="#0F766E" id="meta-theme-color">
   <meta name="color-scheme" content="light dark">
 
   <!-- PWA -->
@@ -19,7 +19,7 @@
   <link rel="icon" type="image/svg+xml" href="/logo.svg">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
   <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" rel="stylesheet">
   <link rel="stylesheet" href="/style.css">
 </head>
@@ -69,6 +69,9 @@
 
         <button class="icon-btn" id="search-toggle-btn" aria-label="Search" title="Search">
           <span class="material-symbols-outlined">search</span>
+        </button>
+        <button class="icon-btn" id="command-btn" aria-label="Command palette" title="Command palette (Ctrl+K)">
+          <span class="material-symbols-outlined">keyboard_command_key</span>
         </button>
         <button class="icon-btn" id="view-toggle-btn" aria-label="Toggle view" title="Toggle view">
           <span class="material-symbols-outlined" id="view-icon">grid_view</span>
@@ -133,6 +136,7 @@
               Modified
             </button>
             <div class="controls-spacer"></div>
+            <span id="shortcut-hint" aria-hidden="true">Ctrl+K for commands</span>
             <span id="item-count" style="font-size:12px;color:var(--md-sys-color-on-surface-variant);align-self:center"></span>
           </div>
 
@@ -151,6 +155,16 @@
             </div>
             <div class="empty-state-title">Nothing here yet</div>
             <div class="empty-state-body">Upload files or create a folder to get started.</div>
+          </div>
+
+          <!-- Auth required state -->
+          <div id="auth-required-state" class="hidden">
+            <div class="empty-icon-wrap auth-lock-icon">
+              <span class="material-symbols-outlined">lock</span>
+            </div>
+            <div class="empty-state-title">Sign in required</div>
+            <div class="empty-state-body">This server requires authentication before files can be loaded.</div>
+            <button class="btn-filled" id="auth-signin-btn" type="button">Sign in</button>
           </div>
 
         </div>
@@ -360,6 +374,24 @@
       <span class="material-symbols-outlined" id="account-theme-icon">dark_mode</span>
       <span id="account-theme-text">Switch to Dark mode</span>
     </div>
+  </div>
+</dialog>
+
+<!-- Command Palette -->
+<dialog id="command-dialog" aria-labelledby="command-title" aria-modal="true">
+  <div class="dialog-header">
+    <div class="dialog-icon"><span class="material-symbols-outlined">keyboard_command_key</span></div>
+    <div id="command-title" class="dialog-title">Command Palette</div>
+  </div>
+  <div class="dialog-body command-body">
+    <div class="text-field command-input-wrap">
+      <label for="command-input">Type a command</label>
+      <input type="text" id="command-input" autocomplete="off" placeholder="Search commands...">
+    </div>
+    <div id="command-results" class="command-results" role="listbox" aria-label="Command list"></div>
+  </div>
+  <div class="dialog-actions">
+    <button class="btn-text" id="command-close-btn" type="button">Close</button>
   </div>
 </dialog>
 

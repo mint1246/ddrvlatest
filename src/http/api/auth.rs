@@ -1,6 +1,6 @@
 use axum::{
     extract::{Request, State},
-    http::{header, Method, StatusCode},
+    http::{header, HeaderMap, Method, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
     Json,
@@ -25,6 +25,67 @@ struct Claims {
 
 fn signing_key(cfg: &crate::config::HttpConfig) -> String {
     format!("{}:{}", cfg.username, cfg.password)
+}
+
+#[derive(Debug, Clone)]
+enum TokenCandidate {
+    None,
+    Found(String),
+    Invalid,
+}
+
+fn token_from_authorization(headers: &HeaderMap) -> TokenCandidate {
+    let Some(raw) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+    else {
+        return TokenCandidate::None;
+    };
+
+    let mut parts = raw.splitn(2, ' ');
+    let scheme = parts.next().unwrap_or_default();
+    let token = parts.next().unwrap_or_default().trim();
+
+    if scheme.eq_ignore_ascii_case("Bearer") && !token.is_empty() {
+        return TokenCandidate::Found(token.to_string());
+    }
+
+    TokenCandidate::Invalid
+}
+
+fn token_from_cookie(headers: &HeaderMap) -> TokenCandidate {
+    let Some(raw_cookie) = headers.get(header::COOKIE).and_then(|v| v.to_str().ok()) else {
+        return TokenCandidate::None;
+    };
+
+    for part in raw_cookie.split(';') {
+        let entry = part.trim();
+        if let Some(token) = entry.strip_prefix("ddrv_token=") {
+            if token.is_empty() {
+                return TokenCandidate::Invalid;
+            }
+            return TokenCandidate::Found(token.to_string());
+        }
+    }
+
+    TokenCandidate::None
+}
+
+fn extract_token(headers: &HeaderMap) -> TokenCandidate {
+    match token_from_authorization(headers) {
+        TokenCandidate::None => token_from_cookie(headers),
+        other => other,
+    }
+}
+
+fn validate_token(cfg: &crate::config::HttpConfig, token: &str) -> bool {
+    let key = signing_key(cfg);
+    decode::<Claims>(
+        token,
+        &DecodingKey::from_secret(key.as_bytes()),
+        &Validation::default(),
+    )
+    .is_ok()
 }
 
 pub async fn login_handler(
@@ -76,41 +137,44 @@ pub async fn auth_middleware(
         return next.run(request).await;
     }
 
-    // Guest mode: allow read-only methods without auth.
-    if cfg.guest_mode {
-        let method = request.method();
-        if matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS) {
-            return next.run(request).await;
+    let token = extract_token(request.headers());
+    let read_only = matches!(
+        *request.method(),
+        Method::GET | Method::HEAD | Method::OPTIONS
+    );
+
+    // Guest mode + read-only requests can proceed without auth token.
+    // If a token is supplied, it must still be valid.
+    if cfg.guest_mode && read_only {
+        match token {
+            TokenCandidate::None => return next.run(request).await,
+            TokenCandidate::Invalid => {
+                return err(StatusCode::UNAUTHORIZED, "missing or invalid token")
+            }
+            TokenCandidate::Found(t) => {
+                if validate_token(cfg, &t) {
+                    return next.run(request).await;
+                }
+                return err(StatusCode::UNAUTHORIZED, "invalid token");
+            }
         }
     }
 
-    // Require Bearer JWT.
-    let auth_header = request
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-
-    if !auth_header.starts_with("Bearer ") {
-        return err(StatusCode::UNAUTHORIZED, "missing or invalid token");
-    }
-
-    let token = &auth_header["Bearer ".len()..];
-    let key = signing_key(cfg);
-    match decode::<Claims>(
-        token,
-        &DecodingKey::from_secret(key.as_bytes()),
-        &Validation::default(),
-    ) {
-        Ok(_) => next.run(request).await,
-        Err(_) => err(StatusCode::UNAUTHORIZED, "invalid token"),
+    // Non-guest or mutating requests require a valid token.
+    match token {
+        TokenCandidate::Found(t) if validate_token(cfg, &t) => next.run(request).await,
+        TokenCandidate::Found(_) => err(StatusCode::UNAUTHORIZED, "invalid token"),
+        TokenCandidate::Invalid | TokenCandidate::None => {
+            err(StatusCode::UNAUTHORIZED, "missing or invalid token")
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{signing_key, Claims};
+    use super::{extract_token, signing_key, Claims, TokenCandidate};
     use crate::config::HttpConfig;
+    use axum::http::{header, HeaderMap, HeaderValue};
     use chrono::Utc;
     use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 
@@ -140,5 +204,33 @@ mod tests {
             &Validation::default(),
         )
         .expect("token should validate");
+    }
+
+    #[test]
+    fn extract_token_uses_cookie_when_authorization_missing() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_static("theme=dark; ddrv_token=abc.def.ghi"),
+        );
+
+        match extract_token(&headers) {
+            TokenCandidate::Found(token) => assert_eq!(token, "abc.def.ghi"),
+            other => panic!("unexpected token candidate: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn extract_token_marks_invalid_authorization() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Token abc123"),
+        );
+
+        match extract_token(&headers) {
+            TokenCandidate::Invalid => {}
+            other => panic!("unexpected token candidate: {other:?}"),
+        }
     }
 }

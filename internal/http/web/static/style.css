@@ -3,50 +3,56 @@
    ============================================================ */
 
 /* ── Google Fonts ─────────────────────────────────────────── */
-@import url('https://fonts.googleapis.com/css2?family=Roboto:ital,wght@0,300;0,400;0,500;0,700;1,400&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
 @import url('https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&display=swap');
 
 /* ── M3 Color Tokens – Light ──────────────────────────────── */
 :root {
-  --md-sys-color-primary:                  #6750A4;
+  --md-sys-color-primary:                  #0F766E;
   --md-sys-color-on-primary:               #FFFFFF;
-  --md-sys-color-primary-container:        #EADDFF;
-  --md-sys-color-on-primary-container:     #21005D;
-  --md-sys-color-secondary:                #625B71;
+  --md-sys-color-primary-container:        #BFF2EC;
+  --md-sys-color-on-primary-container:     #00201D;
+  --md-sys-color-secondary:                #3F5F5B;
   --md-sys-color-on-secondary:             #FFFFFF;
-  --md-sys-color-secondary-container:      #E8DEF8;
-  --md-sys-color-on-secondary-container:   #1D192B;
-  --md-sys-color-tertiary:                 #7D5260;
+  --md-sys-color-secondary-container:      #C2E5DF;
+  --md-sys-color-on-secondary-container:   #0D1F1D;
+  --md-sys-color-tertiary:                 #8C4A2F;
   --md-sys-color-on-tertiary:              #FFFFFF;
-  --md-sys-color-tertiary-container:       #FFD8E4;
-  --md-sys-color-on-tertiary-container:    #31111D;
+  --md-sys-color-tertiary-container:       #FFDCCF;
+  --md-sys-color-on-tertiary-container:    #331107;
   --md-sys-color-error:                    #B3261E;
   --md-sys-color-on-error:                 #FFFFFF;
   --md-sys-color-error-container:          #F9DEDC;
   --md-sys-color-on-error-container:       #410E0B;
-  --md-sys-color-background:               #FFFBFE;
-  --md-sys-color-on-background:            #1C1B1F;
-  --md-sys-color-surface:                  #FFFBFE;
-  --md-sys-color-on-surface:               #1C1B1F;
-  --md-sys-color-surface-variant:          #E7E0EC;
-  --md-sys-color-on-surface-variant:       #49454F;
-  --md-sys-color-outline:                  #79747E;
-  --md-sys-color-outline-variant:          #CAC4D0;
-  --md-sys-color-inverse-surface:          #313033;
-  --md-sys-color-inverse-on-surface:       #F4EFF4;
-  --md-sys-color-inverse-primary:          #D0BCFF;
+  --md-sys-color-background:               #F6FBF9;
+  --md-sys-color-on-background:            #18201E;
+  --md-sys-color-surface:                  #F6FBF9;
+  --md-sys-color-on-surface:               #18201E;
+  --md-sys-color-surface-variant:          #DDE5E1;
+  --md-sys-color-on-surface-variant:       #3F4946;
+  --md-sys-color-outline:                  #6F7975;
+  --md-sys-color-outline-variant:          #BEC9C4;
+  --md-sys-color-inverse-surface:          #2B3230;
+  --md-sys-color-inverse-on-surface:       #ECF2EF;
+  --md-sys-color-inverse-primary:          #8FD5CC;
   --md-sys-color-surface-container-lowest: #FFFFFF;
-  --md-sys-color-surface-container-low:    #F7F2FA;
-  --md-sys-color-surface-container:        #F3EDF7;
-  --md-sys-color-surface-container-high:   #ECE6F0;
-  --md-sys-color-surface-container-highest:#E6E0E9;
-  --md-sys-color-scrim:                    rgba(0,0,0,0.32);
+  --md-sys-color-surface-container-low:    #F0F5F3;
+  --md-sys-color-surface-container:        #EAF0ED;
+  --md-sys-color-surface-container-high:   #E4EAE7;
+  --md-sys-color-surface-container-highest:#DEE5E2;
+  --md-sys-color-scrim:                    rgba(8,17,15,0.36);
+
+  --font-ui:                                'Manrope', 'Segoe UI', sans-serif;
+  --font-display:                           'Space Grotesk', 'Manrope', sans-serif;
+  --font-mono:                              'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  --app-bg-gradient-a:                      rgba(15,118,110,0.14);
+  --app-bg-gradient-b:                      rgba(140,74,47,0.11);
 
   /* Elevation overlays (tinted via primary) */
-  --md-elevation-1: 0 1px 2px rgba(0,0,0,.14), 0 1px 3px rgba(0,0,0,.12);
-  --md-elevation-2: 0 1px 2px rgba(0,0,0,.14), 0 2px 6px rgba(0,0,0,.12);
-  --md-elevation-3: 0 4px 8px rgba(0,0,0,.16), 0 1px 3px rgba(0,0,0,.10);
-  --md-elevation-4: 0 6px 10px rgba(0,0,0,.16), 0 2px 4px rgba(0,0,0,.10);
+  --md-elevation-1: 0 2px 4px rgba(8,17,15,.10), 0 1px 2px rgba(8,17,15,.08);
+  --md-elevation-2: 0 4px 10px rgba(8,17,15,.12), 0 2px 4px rgba(8,17,15,.08);
+  --md-elevation-3: 0 10px 22px rgba(8,17,15,.14), 0 2px 6px rgba(8,17,15,.10);
+  --md-elevation-4: 0 16px 32px rgba(8,17,15,.16), 0 3px 8px rgba(8,17,15,.10);
 
   /* Shape (M3 corner radii) */
   --md-shape-xs:    4px;
@@ -70,39 +76,42 @@
 
 /* ── M3 Color Tokens – Dark ───────────────────────────────── */
 [data-theme="dark"] {
-  --md-sys-color-primary:                  #D0BCFF;
-  --md-sys-color-on-primary:               #381E72;
-  --md-sys-color-primary-container:        #4F378B;
-  --md-sys-color-on-primary-container:     #EADDFF;
-  --md-sys-color-secondary:                #CCC2DC;
-  --md-sys-color-on-secondary:             #332D41;
-  --md-sys-color-secondary-container:      #4A4458;
-  --md-sys-color-on-secondary-container:   #E8DEF8;
-  --md-sys-color-tertiary:                 #EFB8C8;
-  --md-sys-color-on-tertiary:              #492532;
-  --md-sys-color-tertiary-container:       #633B48;
-  --md-sys-color-on-tertiary-container:    #FFD8E4;
-  --md-sys-color-error:                    #F2B8B5;
-  --md-sys-color-on-error:                 #601410;
-  --md-sys-color-error-container:          #8C1D18;
-  --md-sys-color-on-error-container:       #F9DEDC;
-  --md-sys-color-background:               #1C1B1F;
-  --md-sys-color-on-background:            #E6E1E5;
-  --md-sys-color-surface:                  #1C1B1F;
-  --md-sys-color-on-surface:               #E6E1E5;
-  --md-sys-color-surface-variant:          #49454F;
-  --md-sys-color-on-surface-variant:       #CAC4D0;
-  --md-sys-color-outline:                  #938F99;
-  --md-sys-color-outline-variant:          #49454F;
-  --md-sys-color-inverse-surface:          #E6E1E5;
-  --md-sys-color-inverse-on-surface:       #313033;
-  --md-sys-color-inverse-primary:          #6750A4;
-  --md-sys-color-surface-container-lowest: #0F0D13;
-  --md-sys-color-surface-container-low:    #1D1B20;
-  --md-sys-color-surface-container:        #211F26;
-  --md-sys-color-surface-container-high:   #2B2930;
-  --md-sys-color-surface-container-highest:#36343B;
-  --md-sys-color-scrim:                    rgba(0,0,0,0.56);
+  --md-sys-color-primary:                  #8FD5CC;
+  --md-sys-color-on-primary:               #003731;
+  --md-sys-color-primary-container:        #0E5C55;
+  --md-sys-color-on-primary-container:     #BFF2EC;
+  --md-sys-color-secondary:                #A6CCC6;
+  --md-sys-color-on-secondary:             #103732;
+  --md-sys-color-secondary-container:      #274B46;
+  --md-sys-color-on-secondary-container:   #C2E5DF;
+  --md-sys-color-tertiary:                 #FFB59A;
+  --md-sys-color-on-tertiary:              #54210C;
+  --md-sys-color-tertiary-container:       #70331B;
+  --md-sys-color-on-tertiary-container:    #FFDCCF;
+  --md-sys-color-error:                    #FFB4AB;
+  --md-sys-color-on-error:                 #690005;
+  --md-sys-color-error-container:          #93000A;
+  --md-sys-color-on-error-container:       #FFDAD6;
+  --md-sys-color-background:               #111715;
+  --md-sys-color-on-background:            #DEE5E2;
+  --md-sys-color-surface:                  #111715;
+  --md-sys-color-on-surface:               #DEE5E2;
+  --md-sys-color-surface-variant:          #3F4946;
+  --md-sys-color-on-surface-variant:       #BEC9C4;
+  --md-sys-color-outline:                  #89938F;
+  --md-sys-color-outline-variant:          #3F4946;
+  --md-sys-color-inverse-surface:          #DEE5E2;
+  --md-sys-color-inverse-on-surface:       #2B3230;
+  --md-sys-color-inverse-primary:          #0F766E;
+  --md-sys-color-surface-container-lowest: #0B110F;
+  --md-sys-color-surface-container-low:    #181E1C;
+  --md-sys-color-surface-container:        #1C2320;
+  --md-sys-color-surface-container-high:   #262C2A;
+  --md-sys-color-surface-container-highest:#313735;
+  --md-sys-color-scrim:                    rgba(0,0,0,0.58);
+
+  --app-bg-gradient-a:                      rgba(143,213,204,0.14);
+  --app-bg-gradient-b:                      rgba(255,181,154,0.10);
 }
 
 /* ── Reset & Base ─────────────────────────────────────────── */
@@ -115,8 +124,12 @@ html {
 }
 
 body {
-  font-family: 'Roboto', system-ui, -apple-system, sans-serif;
+  font-family: var(--font-ui);
   background-color: var(--md-sys-color-background);
+  background-image:
+    radial-gradient(900px 420px at 6% -8%, var(--app-bg-gradient-a), transparent 60%),
+    radial-gradient(680px 360px at 92% 10%, var(--app-bg-gradient-b), transparent 58%);
+  background-attachment: fixed;
   color: var(--md-sys-color-on-background);
   min-height: 100dvh;
   overflow-x: hidden;
@@ -142,6 +155,28 @@ body {
   display: flex;
   flex-direction: column;
   min-height: 100dvh;
+}
+
+#app:not(.ready) #top-app-bar,
+#app:not(.ready) .content-body {
+  opacity: 0;
+  transform: translateY(8px);
+}
+
+#app.ready #top-app-bar,
+#app.ready .content-body {
+  animation: appShellIn var(--md-motion-dur-medium4) var(--md-motion-standard-decel) both;
+}
+
+@keyframes appShellIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .app-layout {
@@ -223,8 +258,10 @@ body {
   gap: 4px;
   height: 64px;
   padding: 0 4px 0 4px;
-  background: var(--md-sys-color-surface-container-low);
+  background: color-mix(in srgb, var(--md-sys-color-surface-container-low) 88%, transparent);
   border-bottom: 1px solid var(--md-sys-color-outline-variant);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
   position: sticky;
   top: 0;
   z-index: 200;
@@ -245,10 +282,11 @@ body {
 }
 .app-bar-logo-wrap img { width: 32px; height: 32px; }
 .app-bar-title {
+  font-family: var(--font-display);
   font-size: 22px;
-  font-weight: 700;
+  font-weight: 600;
   color: var(--md-sys-color-on-surface);
-  letter-spacing: -0.5px;
+  letter-spacing: -0.25px;
 }
 
 /* inline search (desktop) */
@@ -308,6 +346,21 @@ body {
 .icon-btn:active { background: color-mix(in srgb, var(--md-sys-color-on-surface) 12%, transparent); transform: scale(0.94); }
 .icon-btn.primary { color: var(--md-sys-color-primary); }
 .icon-btn.danger { color: var(--md-sys-color-error); }
+
+.icon-btn:focus-visible,
+.filter-chip:focus-visible,
+.fab:focus-visible,
+.btn-filled:focus-visible,
+.btn-text:focus-visible,
+.menu-item:focus-visible,
+.file-row:focus-visible,
+.folder-card:focus-visible,
+.bottom-nav-item:focus-visible,
+.nav-rail-item:focus-visible,
+.breadcrumb-item:focus-visible {
+  outline: 2px solid var(--md-sys-color-primary);
+  outline-offset: 2px;
+}
 
 /* ── Main Content ─────────────────────────────────────────── */
 #main-content {
@@ -468,6 +521,18 @@ body {
 #mobile-search-wrap .search-field .material-symbols-outlined { color: var(--md-sys-color-on-surface-variant); }
 .controls-spacer { flex: 1; }
 
+#shortcut-hint {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.12px;
+  color: var(--md-sys-color-on-surface-variant);
+  align-self: center;
+  padding: 6px 10px;
+  border-radius: var(--md-shape-full);
+  border: 1px dashed color-mix(in srgb, var(--md-sys-color-outline) 70%, transparent);
+  background: color-mix(in srgb, var(--md-sys-color-primary) 4%, transparent);
+}
+
 /* ── File Grid ────────────────────────────────────────────── */
 #files-container {
   padding: 12px 0;
@@ -516,6 +581,24 @@ body {
 }
 
 .folder-card:active { transform: scale(0.97); }
+
+.folder-card,
+.file-row {
+  animation: revealItem var(--md-motion-dur-medium2) var(--md-motion-standard-decel);
+  animation-delay: var(--reveal-delay, 0ms);
+  animation-fill-mode: both;
+}
+
+@keyframes revealItem {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
 
 .folder-card.selected {
   background: var(--md-sys-color-secondary-container);
@@ -693,6 +776,26 @@ body {
 }
 #empty-state.hidden { display: none; }
 
+#auth-required-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  gap: 14px;
+  padding: 72px 24px;
+}
+
+#auth-required-state.hidden { display: none; }
+
+.auth-lock-icon {
+  background: color-mix(in srgb, var(--md-sys-color-tertiary-container) 70%, var(--md-sys-color-surface-container));
+}
+
+.auth-lock-icon .material-symbols-outlined {
+  color: var(--md-sys-color-on-tertiary-container);
+}
+
 .empty-icon-wrap {
   width: 96px;
   height: 96px;
@@ -710,8 +813,9 @@ body {
 }
 
 .empty-state-title {
+  font-family: var(--font-display);
   font-size: 22px;
-  font-weight: 600;
+  font-weight: 700;
   color: var(--md-sys-color-on-surface);
 }
 .empty-state-body {
@@ -1031,7 +1135,7 @@ dialog::backdrop {
 }
 .dialog-icon.error { background: var(--md-sys-color-error-container); }
 .dialog-icon.error .material-symbols-outlined { color: var(--md-sys-color-on-error-container); }
-.dialog-title { font-size: 20px; font-weight: 700; color: var(--md-sys-color-on-surface); }
+.dialog-title { font-family: var(--font-display); font-size: 20px; font-weight: 700; color: var(--md-sys-color-on-surface); }
 
 .dialog-body { padding: 0 24px 8px; }
 .dialog-body p { font-size: 14px; color: var(--md-sys-color-on-surface-variant); line-height: 1.5; }
@@ -1169,6 +1273,88 @@ dialog::backdrop {
   width: min(280px, calc(100vw - 32px));
   border-radius: var(--md-shape-xl);
 }
+
+#command-dialog {
+  width: min(680px, calc(100vw - 24px));
+  max-height: min(78vh, 680px);
+}
+
+.command-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.command-input-wrap {
+  margin: 0;
+}
+
+.command-results {
+  max-height: 420px;
+  overflow: auto;
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-shape-lg);
+  background: color-mix(in srgb, var(--md-sys-color-surface-container-low) 92%, transparent);
+  padding: 6px;
+}
+
+.command-item {
+  width: 100%;
+  border: none;
+  background: transparent;
+  display: grid;
+  grid-template-columns: 24px 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 10px;
+  border-radius: var(--md-shape-md);
+  color: var(--md-sys-color-on-surface);
+  font: inherit;
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.command-item:hover,
+.command-item.active {
+  background: var(--md-sys-color-secondary-container);
+  color: var(--md-sys-color-on-secondary-container);
+}
+
+.command-item-icon {
+  color: var(--md-sys-color-on-surface-variant);
+  font-size: 20px;
+}
+
+.command-item.active .command-item-icon,
+.command-item:hover .command-item-icon {
+  color: inherit;
+}
+
+.command-shortcut {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--md-sys-color-on-surface-variant);
+  background: color-mix(in srgb, var(--md-sys-color-surface-container-highest) 75%, transparent);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-shape-sm);
+  padding: 4px 7px;
+  white-space: nowrap;
+}
+
+.command-item.active .command-shortcut,
+.command-item:hover .command-shortcut {
+  color: inherit;
+  border-color: color-mix(in srgb, var(--md-sys-color-on-secondary-container) 30%, transparent);
+  background: color-mix(in srgb, var(--md-sys-color-on-secondary-container) 10%, transparent);
+}
+
+.command-empty {
+  padding: 18px 12px;
+  text-align: center;
+  color: var(--md-sys-color-on-surface-variant);
+  font-size: 13px;
+}
 .menu-list { padding: 8px 0; }
 .menu-item {
   display: flex;
@@ -1288,7 +1474,7 @@ dialog::backdrop {
   border: 1px solid var(--md-sys-color-outline-variant);
   background: var(--md-sys-color-surface-container-lowest);
   color: var(--md-sys-color-on-surface);
-  font-family: 'Roboto Mono', ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', Menlo, monospace;
+  font-family: var(--font-mono);
   outline: none;
 }
 .viewer-text-wrap textarea:focus {
@@ -1331,6 +1517,10 @@ dialog::backdrop {
   #bottom-nav { display: none; }
   
   .content-body { padding-bottom: 48px; }
+}
+
+@media (max-width: 767px) {
+  #shortcut-hint { display: none; }
 }
 
 /* Desktop (>= 1240px) */

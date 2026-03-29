@@ -19,7 +19,11 @@ fn dp_err(e: DataProviderError) -> Response {
 }
 
 fn validate_name(name: &str) -> bool {
-    !name.is_empty() && !name.contains(|c| matches!(c, '/' | '<' | '>' | '"' | '|' | '*'))
+    let trimmed = name.trim();
+    !trimmed.is_empty()
+        && trimmed.len() <= 255
+        && !trimmed.contains(|c| matches!(c, '/' | '<' | '>' | '"' | '|' | '*' | '\\'))
+        && !trimmed.chars().any(|c| c.is_control())
 }
 
 /// GET /api/directories/:id   (or GET /api/directories with no id)

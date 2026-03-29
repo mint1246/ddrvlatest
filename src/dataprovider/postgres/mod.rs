@@ -280,11 +280,7 @@ impl DataProvider for PgProvider {
         let total = all_nodes.len();
 
         // Compute the cumulative byte offset at the start of the requested page.
-        let byte_offset: u64 = all_nodes
-            .iter()
-            .take(offset)
-            .map(|n| n.size as u64)
-            .sum();
+        let byte_offset: u64 = all_nodes.iter().take(offset).map(|n| n.size as u64).sum();
 
         if offset >= total || limit == 0 {
             return Ok((Vec::new(), total, byte_offset));
