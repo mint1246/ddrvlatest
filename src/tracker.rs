@@ -63,9 +63,7 @@ async fn refresh_all_files(provider: &Arc<dyn DataProvider>) -> Result<(), DataP
 
     info!(
         dirs_scanned,
-        files_scanned,
-        refresh_errors,
-        "tracker renewal cycle finished"
+        files_scanned, refresh_errors, "tracker renewal cycle finished"
     );
 
     Ok(())

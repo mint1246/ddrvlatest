@@ -1,5 +1,4 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -158,7 +157,10 @@ impl Rest {
     /// Fetch a single message by exact message ID.
     pub async fn get_message(&self, channel_id: &str, message_id: i64) -> Result<Message> {
         let path_suffix = format!("/{}/messages", channel_id);
-        let url = format!("{}/channels/{}/messages/{}", BASE_URL, channel_id, message_id);
+        let url = format!(
+            "{}/channels/{}/messages/{}",
+            BASE_URL, channel_id, message_id
+        );
 
         let resp = self.do_req(&path_suffix, |c, _t| c.get(&url), true).await?;
         let status = resp.status().as_u16();

@@ -8,7 +8,10 @@ use axum::{
 use chrono::Utc;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
-use std::{sync::{Arc, Mutex, OnceLock}, time::Duration};
+use std::{
+    sync::{Arc, Mutex, OnceLock},
+    time::Duration,
+};
 use tokio_util::io::ReaderStream;
 use tracing::{info, warn};
 
@@ -31,7 +34,37 @@ fn dp_err(e: DataProviderError) -> Response {
 }
 
 fn validate_name(name: &str) -> bool {
-    !name.is_empty() && !name.contains(|c| matches!(c, '/' | '<' | '>' | '"' | '|' | '*'))
+    let trimmed = name.trim();
+    !trimmed.is_empty()
+        && trimmed.len() <= 255
+        && !trimmed.contains(|c| matches!(c, '/' | '<' | '>' | '"' | '|' | '*' | '\\'))
+        && !trimmed.chars().any(|c| c.is_control())
+}
+
+fn safe_content_disposition_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for c in name.chars() {
+        if c == '"' || c == '\\' {
+            out.push('_');
+        } else if c.is_control() {
+            continue;
+        } else {
+            out.push(c);
+        }
+    }
+
+    if out.trim().is_empty() {
+        "download".to_string()
+    } else {
+        out
+    }
+}
+
+fn push_collected_chunk(nodes: &Arc<Mutex<Vec<Node>>>, chunk: Node) {
+    match nodes.lock() {
+        Ok(mut guard) => guard.push(chunk),
+        Err(poisoned) => poisoned.into_inner().push(chunk),
+    }
 }
 
 /// GET /api/directories/:dir_id/files/:id
@@ -54,10 +87,23 @@ pub async fn create_file_handler(
 ) -> Response {
     let dp = dataprovider::get();
 
-    while let Ok(Some(field)) = multipart.next_field().await {
+    loop {
+        let Some(mut field) = (match multipart.next_field().await {
+            Ok(next) => next,
+            Err(e) => {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    format!("invalid multipart payload: {e}"),
+                )
+            }
+        }) else {
+            break;
+        };
+
         if field.name() != Some("file") {
             continue;
         }
+
         let filename = match field.file_name() {
             Some(n) => n.to_string(),
             None => return err(StatusCode::BAD_REQUEST, "missing filename"),
@@ -66,50 +112,96 @@ pub async fn create_file_handler(
             return err(StatusCode::BAD_REQUEST, "invalid filename");
         }
 
-        let file = match dp.create(&filename, &dir_id, false).await {
+        let created = match dp.create(&filename, &dir_id, false).await {
             Ok(f) => f,
             Err(e) => return dp_err(e),
         };
 
         let nodes: Arc<Mutex<Vec<Node>>> = Arc::new(Mutex::new(Vec::new()));
-        let file_id = file.id.clone();
-
-        // Use async writer; read all field bytes
-        let data = match field.bytes().await {
-            Ok(b) => b,
-            Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-        };
+        let file_id = created.id.clone();
 
         if state.config.async_write {
             let nodes_cb = Arc::clone(&nodes);
             let mut writer = state.driver.new_nwriter(move |chunk| {
-                nodes_cb.lock().expect("nodes mutex poisoned").push(chunk);
+                push_collected_chunk(&nodes_cb, chunk);
             });
             use tokio::io::AsyncWriteExt;
-            if let Err(e) = writer.write_all(&data).await {
-                return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+
+            loop {
+                let next = match field.chunk().await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let _ = dp.delete(&file_id, Some(&dir_id)).await;
+                        return err(
+                            StatusCode::BAD_REQUEST,
+                            format!("invalid multipart chunk: {e}"),
+                        );
+                    }
+                };
+
+                let Some(chunk) = next else {
+                    break;
+                };
+
+                if let Err(e) = writer.write_all(&chunk).await {
+                    let _ = dp.delete(&file_id, Some(&dir_id)).await;
+                    return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+                }
             }
+
             if let Err(e) = writer.shutdown().await {
+                let _ = dp.delete(&file_id, Some(&dir_id)).await;
                 return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
             }
         } else {
             let nodes_cb = Arc::clone(&nodes);
             let mut writer = state.driver.new_writer(move |chunk| {
-                nodes_cb.lock().expect("nodes mutex poisoned").push(chunk);
+                push_collected_chunk(&nodes_cb, chunk);
             });
             use tokio::io::AsyncWriteExt;
-            if let Err(e) = writer.write_all(&data).await {
-                return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+
+            loop {
+                let next = match field.chunk().await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let _ = dp.delete(&file_id, Some(&dir_id)).await;
+                        return err(
+                            StatusCode::BAD_REQUEST,
+                            format!("invalid multipart chunk: {e}"),
+                        );
+                    }
+                };
+
+                let Some(chunk) = next else {
+                    break;
+                };
+
+                if let Err(e) = writer.write_all(&chunk).await {
+                    let _ = dp.delete(&file_id, Some(&dir_id)).await;
+                    return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+                }
             }
+
             if let Err(e) = writer.shutdown().await {
+                let _ = dp.delete(&file_id, Some(&dir_id)).await;
                 return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
             }
         }
 
-        let collected = nodes.lock().expect("nodes mutex poisoned").clone();
+        let collected = match nodes.lock() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+
         if let Err(e) = dp.create_nodes(&file_id, &collected).await {
+            let _ = dp.delete(&file_id, Some(&dir_id)).await;
             return dp_err(e);
         }
+
+        let file = match dp.get_by_id(&file_id, Some(&dir_id)).await {
+            Ok(f) => f,
+            Err(e) => return dp_err(e),
+        };
 
         return ApiResponse::ok(file).into_response();
     }
@@ -357,11 +449,7 @@ pub async fn manifest_file_handler(
             Err(e) => return dp_err(e),
         };
         let total = all_nodes.len();
-        let byte_offset: u64 = all_nodes
-            .iter()
-            .take(offset)
-            .map(|n| n.size as u64)
-            .sum();
+        let byte_offset: u64 = all_nodes.iter().take(offset).map(|n| n.size as u64).sum();
         let page = if offset < total {
             all_nodes[offset..].to_vec()
         } else {
@@ -401,7 +489,10 @@ pub async fn manifest_file_handler(
 
         tokio::spawn(async move {
             let dp = dataprovider::get();
-            match dp.get_nodes_paged(&prefetch_id, next_offset, prefetch_limit).await {
+            match dp
+                .get_nodes_paged(&prefetch_id, next_offset, prefetch_limit)
+                .await
+            {
                 Ok((nodes, total, _)) => {
                     let done_end = (next_offset + nodes.len()).min(total);
                     let done_pct = if total > 0 {
@@ -533,14 +624,15 @@ async fn stream_file(state: AppState, id: String, headers: HeaderMap) -> Respons
     let mime = mime_guess::from_ext(ext)
         .first_or_octet_stream()
         .to_string();
+    let safe_name = safe_content_disposition_name(&file.name);
     let disposition = if mime.starts_with("audio/")
         || mime.starts_with("video/")
         || mime.starts_with("image/")
         || mime.starts_with("text/")
     {
-        format!("inline; filename=\"{}\"", file.name)
+        format!("inline; filename=\"{}\"", safe_name)
     } else {
-        format!("attachment; filename=\"{}\"", file.name)
+        format!("attachment; filename=\"{}\"", safe_name)
     };
 
     // Handle Range header
@@ -606,6 +698,11 @@ pub async fn overwrite_file_handler(
         Err(e) => return dp_err(e),
     };
 
+    let old_nodes = match dp.get_nodes(&id).await {
+        Ok(n) => n,
+        Err(e) => return dp_err(e),
+    };
+
     let data = body;
     let nodes: Arc<Mutex<Vec<Node>>> = Arc::new(Mutex::new(Vec::new()));
 
@@ -613,7 +710,7 @@ pub async fn overwrite_file_handler(
     if state.config.async_write {
         let nodes_cb = Arc::clone(&nodes);
         let mut writer = state.driver.new_nwriter(move |chunk| {
-            nodes_cb.lock().expect("nodes mutex poisoned").push(chunk);
+            push_collected_chunk(&nodes_cb, chunk);
         });
         use tokio::io::AsyncWriteExt;
         if let Err(e) = writer.write_all(&data).await {
@@ -625,7 +722,7 @@ pub async fn overwrite_file_handler(
     } else {
         let nodes_cb = Arc::clone(&nodes);
         let mut writer = state.driver.new_writer(move |chunk| {
-            nodes_cb.lock().expect("nodes mutex poisoned").push(chunk);
+            push_collected_chunk(&nodes_cb, chunk);
         });
         use tokio::io::AsyncWriteExt;
         if let Err(e) = writer.write_all(&data).await {
@@ -636,11 +733,31 @@ pub async fn overwrite_file_handler(
         }
     }
 
-    let collected = nodes.lock().expect("nodes mutex poisoned").clone();
+    let collected = match nodes.lock() {
+        Ok(guard) => guard.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
+    };
+
     if let Err(e) = dp.truncate(&id).await {
         return dp_err(e);
     }
+
     if let Err(e) = dp.create_nodes(&id, &collected).await {
+        warn!(
+            file_id = %id,
+            error = %e,
+            "overwrite create_nodes failed; attempting to restore original nodes"
+        );
+
+        let _ = dp.truncate(&id).await;
+        if let Err(restore_err) = dp.create_nodes(&id, &old_nodes).await {
+            warn!(
+                file_id = %id,
+                error = %restore_err,
+                "failed to restore original nodes after overwrite failure"
+            );
+        }
+
         return dp_err(e);
     }
 
@@ -656,10 +773,16 @@ pub async fn overwrite_file_handler(
 /// Parse "bytes=start-end" range header. Returns (start, end, length).
 fn parse_range(header: &str, size: i64) -> Result<(i64, i64, i64), ()> {
     let header = header.trim();
+    if size <= 0 {
+        return Err(());
+    }
     if !header.starts_with("bytes=") {
         return Err(());
     }
     let range = &header["bytes=".len()..];
+    if range.contains(',') {
+        return Err(());
+    }
     if let Some(suffix) = range.strip_prefix('-') {
         let n: i64 = suffix.parse().map_err(|_| ())?;
         let start = size - n;
@@ -720,5 +843,28 @@ impl<R: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for LimitedReader<R> 
             self.remaining -= n;
         }
         res
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_range, safe_content_disposition_name};
+
+    #[test]
+    fn parse_range_rejects_empty_file_and_multi_range() {
+        assert!(parse_range("bytes=0-0", 0).is_err());
+        assert!(parse_range("bytes=0-1,4-8", 10).is_err());
+    }
+
+    #[test]
+    fn parse_range_accepts_open_ended_range() {
+        let parsed = parse_range("bytes=5-", 10).expect("range should parse");
+        assert_eq!(parsed, (5, 9, 5));
+    }
+
+    #[test]
+    fn content_disposition_name_strips_unsafe_chars() {
+        let cleaned = safe_content_disposition_name("bad\r\nname\".txt");
+        assert_eq!(cleaned, "badname_.txt");
     }
 }

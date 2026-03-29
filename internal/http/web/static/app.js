@@ -15,6 +15,15 @@ function readTokenFromCookie() {
   return decodeURIComponent(entry.split('=')[1] || '');
 }
 
+function readSavedSortBy() {
+  const stored = localStorage.getItem('sort_by');
+  return ['name', 'size', 'mtime'].includes(stored) ? stored : 'name';
+}
+
+function readSavedSortDesc() {
+  return localStorage.getItem('sort_desc') === '1';
+}
+
 const state = {
   config: { login: false, anonymous: true },
   authenticated: false,
@@ -23,13 +32,16 @@ const state = {
   breadcrumbs: [{ id: 'root', name: 'Home' }],
   selected: new Set(),   // ids
   filterText: '',
-  sortBy: 'name',
-  sortDesc: false,
+  sortBy: readSavedSortBy(),
+  sortDesc: readSavedSortDesc(),
   viewMode: localStorage.getItem('view_mode') || 'list',
   isDragging: false,
   uploads: new Map(),    // filename → { el, pct }
   viewer: null,
   snackTimer: null,
+  authRequired: false,
+  commandItems: [],
+  commandIndex: 0,
 };
 
 /* ══════════════════════════════════════════════════════════
@@ -370,7 +382,7 @@ function renderFiles() {
 
     const grid = document.createElement('div');
     grid.className = 'folders-grid';
-    folders.forEach(f => grid.appendChild(makeFolderCard(f)));
+    folders.forEach((f, i) => grid.appendChild(makeFolderCard(f, i)));
     container.appendChild(grid);
 
     if (fileItems.length > 0) {
@@ -382,25 +394,26 @@ function renderFiles() {
 
       const list = document.createElement('div');
       list.className = 'files-list';
-      fileItems.forEach(f => list.appendChild(makeFileRow(f)));
+      fileItems.forEach((f, i) => list.appendChild(makeFileRow(f, i + folders.length)));
       container.appendChild(list);
     }
   } else {
     // List view: all items in one list
     const list = document.createElement('div');
     list.className = 'files-list';
-    files.forEach(f => list.appendChild(makeFileRow(f)));
+    files.forEach((f, i) => list.appendChild(makeFileRow(f, i)));
     container.appendChild(list);
   }
 }
 
-function makeFolderCard(file) {
+function makeFolderCard(file, renderIndex = 0) {
   const card = document.createElement('div');
   card.className = 'folder-card' + (state.selected.has(file.id) ? ' selected' : '');
   card.setAttribute('data-id', file.id);
   card.setAttribute('tabindex', '0');
   card.setAttribute('role', 'button');
   card.setAttribute('aria-label', 'Folder: ' + file.name);
+  card.style.setProperty('--reveal-delay', Math.min(renderIndex * 22, 220) + 'ms');
 
   card.innerHTML = `
     <div class="folder-icon">
@@ -425,15 +438,27 @@ function makeFolderCard(file) {
     toggleSelect(file.id, card);
   });
 
+  card.addEventListener('keydown', e => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      navigateTo(file.id);
+    }
+    if (e.key === ' ') {
+      e.preventDefault();
+      toggleSelect(file.id, card);
+    }
+  });
+
   return card;
 }
 
-function makeFileRow(file) {
+function makeFileRow(file, renderIndex = 0) {
   const row = document.createElement('div');
   row.className = 'file-row' + (state.selected.has(file.id) ? ' selected' : '');
   row.setAttribute('data-id', file.id);
   row.setAttribute('tabindex', '0');
   row.setAttribute('role', 'row');
+  row.style.setProperty('--reveal-delay', Math.min(renderIndex * 18, 260) + 'ms');
 
   const icon = fileIcon(file);
   const dateStr = file.mtime ? formatDate(file.mtime) : '';
@@ -473,6 +498,18 @@ function makeFileRow(file) {
   row.addEventListener('contextmenu', e => {
     e.preventDefault();
     toggleSelect(file.id, row);
+  });
+
+  row.addEventListener('keydown', e => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (file.dir) navigateTo(file.id);
+      else openFile(file);
+    }
+    if (e.key === ' ') {
+      e.preventDefault();
+      toggleSelect(file.id, row);
+    }
   });
 
   return row;
@@ -529,11 +566,34 @@ function updateSelectionToolbar() {
   }
 }
 
+function setAuthRequired(required) {
+  state.authRequired = required;
+  const authState = document.getElementById('auth-required-state');
+  const bodyText = authState?.querySelector('.empty-state-body');
+
+  if (required) {
+    document.getElementById('loading-state')?.classList.add('hidden');
+    document.getElementById('files-container')?.classList.add('hidden');
+    document.getElementById('empty-state')?.classList.add('hidden');
+    document.getElementById('item-count').textContent = '';
+    if (authState) authState.classList.remove('hidden');
+    if (bodyText) {
+      bodyText.textContent = state.config.anonymous
+        ? 'Sign in to access account-only actions and private files.'
+        : 'This server requires authentication before files can be loaded.';
+    }
+    return;
+  }
+
+  if (authState) authState.classList.add('hidden');
+}
+
 /* ══════════════════════════════════════════════════════════
    Navigation
 ═══════════════════════════════════════════════════════════ */
 async function navigateTo(id, crumbIndex = null) {
   clearSelection();
+  setAuthRequired(false);
   document.getElementById('loading-state').classList.remove('hidden');
   document.getElementById('files-container').classList.add('hidden');
   document.getElementById('empty-state').classList.add('hidden');
@@ -559,9 +619,11 @@ async function navigateTo(id, crumbIndex = null) {
 
     renderBreadcrumbs();
     renderFiles();
+    localStorage.setItem('last_dir_id', state.directory.id || 'root');
   } catch (err) {
     document.getElementById('loading-state').classList.add('hidden');
     if (err.status === 401) {
+      setAuthRequired(true);
       handleUnauthorized();
     } else {
       showSnack('Failed to load directory: ' + err.message, 'error');
@@ -708,9 +770,10 @@ async function downloadFile(file) {
 
   const progressContainer = document.getElementById('upload-progress');
   const cardId = 'dl-' + file.id;
+  let writer = null;
 
   // Build a download-progress card reusing the upload-card styles.
-const card = document.createElement('div');
+  const card = document.createElement('div');
   card.className = 'upload-card';
   card.id = cardId;
   card.innerHTML =
@@ -758,7 +821,6 @@ const card = document.createElement('div');
     let lastName     = file.name;
     let lastMime     = 'application/octet-stream';
     const startedAt  = performance.now();
-    let writer       = null;
     let streamSave   = false;
 
     // Stream directly to disk when supported to avoid large in-memory buffers.
@@ -990,7 +1052,10 @@ async function saveViewerEdits() {
    Auth
 ═══════════════════════════════════════════════════════════ */
 function handleUnauthorized() {
+  state.authenticated = false;
+  updateAccountUI();
   if (state.config.login) {
+    setAuthRequired(true);
     openDialog('login-dialog');
   }
 }
@@ -1097,7 +1162,7 @@ function applyTheme(dark) {
   localStorage.setItem('theme', dark ? 'dark' : 'light');
 
   const metaTheme = document.getElementById('meta-theme-color');
-  if (metaTheme) metaTheme.content = dark ? '#1C1B1F' : '#6750A4';
+  if (metaTheme) metaTheme.content = dark ? '#111715' : '#0F766E';
 
   // Update all theme icons/labels
   ['theme-icon', 'theme-icon-rail', 'account-theme-icon'].forEach(id => {
@@ -1175,6 +1240,210 @@ function updateSortChips() {
     const dir = el.getAttribute('data-check-dir');
     el.classList.toggle('hidden', (dir === 'asc' && state.sortDesc) || (dir === 'desc' && !state.sortDesc));
   });
+
+  localStorage.setItem('sort_by', state.sortBy);
+  localStorage.setItem('sort_desc', state.sortDesc ? '1' : '0');
+}
+
+/* ══════════════════════════════════════════════════════════
+   Command Palette
+═══════════════════════════════════════════════════════════ */
+function isTypingTarget(target) {
+  if (!target) return false;
+  const tag = target.tagName;
+  return target.isContentEditable || tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+}
+
+function buildCommandItems() {
+  const items = [
+    {
+      id: 'refresh',
+      icon: 'refresh',
+      label: 'Refresh current folder',
+      shortcut: 'Ctrl+R',
+      keywords: 'reload sync folder',
+      run: async () => { await navigateTo(state.directory.id || 'root'); },
+    },
+    {
+      id: 'search',
+      icon: 'search',
+      label: 'Focus search',
+      shortcut: '/',
+      keywords: 'find lookup',
+      run: () => {
+        const input = document.getElementById('search-input') || document.getElementById('mobile-search-input');
+        input?.focus();
+        input?.select?.();
+      },
+    },
+    {
+      id: 'upload',
+      icon: 'upload_file',
+      label: 'Upload files',
+      shortcut: 'U',
+      keywords: 'send add import',
+      run: () => document.getElementById('file-input')?.click(),
+    },
+    {
+      id: 'new-folder',
+      icon: 'create_new_folder',
+      label: 'Create new folder',
+      shortcut: 'N',
+      keywords: 'directory mkdir',
+      run: () => {
+        const nameInput = document.getElementById('folder-name-input');
+        const err = document.getElementById('cf-error');
+        if (nameInput) nameInput.value = '';
+        if (err) err.textContent = '';
+        openDialog('create-folder-dialog');
+      },
+    },
+    {
+      id: 'toggle-theme',
+      icon: 'contrast',
+      label: 'Toggle theme',
+      shortcut: 'T',
+      keywords: 'dark light mode',
+      run: () => toggleTheme(),
+    },
+    {
+      id: 'toggle-view',
+      icon: state.viewMode === 'grid' ? 'view_list' : 'grid_view',
+      label: state.viewMode === 'grid' ? 'Switch to list view' : 'Switch to grid view',
+      shortcut: 'V',
+      keywords: 'layout cards rows',
+      run: () => {
+        state.viewMode = state.viewMode === 'grid' ? 'list' : 'grid';
+        localStorage.setItem('view_mode', state.viewMode);
+        updateViewToggle();
+        renderFiles();
+      },
+    },
+  ];
+
+  if (state.selected.size > 0) {
+    items.push({
+      id: 'clear-selection',
+      icon: 'deselect',
+      label: 'Clear selection',
+      shortcut: 'Esc',
+      keywords: 'unselect',
+      run: () => clearSelection(),
+    });
+  }
+
+  if (state.config.login) {
+    if (state.authenticated) {
+      items.push({
+        id: 'logout',
+        icon: 'logout',
+        label: 'Sign out',
+        shortcut: 'L',
+        keywords: 'account auth',
+        run: async () => {
+          api.logout();
+          state.authenticated = false;
+          updateAccountUI();
+          showSnack('Signed out');
+          await navigateTo('root');
+        },
+      });
+    } else {
+      items.push({
+        id: 'login',
+        icon: 'login',
+        label: 'Sign in',
+        shortcut: 'I',
+        keywords: 'account auth login',
+        run: () => openDialog('login-dialog'),
+      });
+    }
+  }
+
+  return items;
+}
+
+function setCommandActive(index) {
+  const buttons = Array.from(document.querySelectorAll('.command-item'));
+  if (buttons.length === 0) {
+    state.commandIndex = 0;
+    return;
+  }
+
+  const bounded = Math.max(0, Math.min(index, buttons.length - 1));
+  state.commandIndex = bounded;
+  buttons.forEach((btn, i) => {
+    const active = i === bounded;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-selected', active ? 'true' : 'false');
+  });
+  buttons[bounded].scrollIntoView({ block: 'nearest' });
+}
+
+function renderCommandItems(query = '') {
+  const resultWrap = document.getElementById('command-results');
+  if (!resultWrap) return;
+
+  const needle = query.trim().toLowerCase();
+  const all = buildCommandItems();
+  const filtered = all.filter(item => {
+    if (!needle) return true;
+    const hay = (item.label + ' ' + (item.keywords || '') + ' ' + (item.shortcut || '')).toLowerCase();
+    return hay.includes(needle);
+  });
+
+  state.commandItems = filtered;
+  resultWrap.innerHTML = '';
+
+  if (filtered.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'command-empty';
+    empty.textContent = 'No matching command';
+    resultWrap.appendChild(empty);
+    state.commandIndex = 0;
+    return;
+  }
+
+  filtered.forEach((item, idx) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'command-item';
+    btn.setAttribute('role', 'option');
+    btn.setAttribute('aria-selected', idx === 0 ? 'true' : 'false');
+    btn.dataset.index = String(idx);
+    btn.innerHTML = `
+      <span class="material-symbols-outlined command-item-icon">${escHtml(item.icon)}</span>
+      <span>${escHtml(item.label)}</span>
+      <span class="command-shortcut">${escHtml(item.shortcut || '')}</span>`;
+    btn.addEventListener('click', async () => {
+      closeDialog('command-dialog');
+      try {
+        await item.run();
+      } catch (err) {
+        showSnack('Command failed: ' + (err?.message || 'Unknown error'), 'error');
+      }
+    });
+    resultWrap.appendChild(btn);
+  });
+
+  setCommandActive(0);
+}
+
+function openCommandPalette(prefill = '') {
+  closeDialog('account-menu');
+  closeDialog('sort-menu');
+  openDialog('command-dialog');
+  const input = document.getElementById('command-input');
+  if (input) {
+    input.value = prefill;
+    renderCommandItems(input.value);
+    setTimeout(() => {
+      input.focus();
+      input.select();
+    }, 0);
+  } else {
+    renderCommandItems(prefill);
+  }
 }
 
 /* ══════════════════════════════════════════════════════════
@@ -1210,20 +1479,26 @@ async function initApp() {
     } catch {
       clearAuthToken();
       if (state.config.login && !state.config.anonymous) {
+        setAuthRequired(true);
         openDialog('login-dialog');
       }
     }
   } else if (state.config.login && !state.config.anonymous) {
+    setAuthRequired(true);
     openDialog('login-dialog');
   }
 
   updateAccountUI();
+  updateSortChips();
 
   // Apply view mode
   updateViewToggle();
 
-  // Load root
-  await navigateTo('root');
+  // Restore previous location when available.
+  const startDir = localStorage.getItem('last_dir_id') || 'root';
+  await navigateTo(startDir);
+
+  document.getElementById('app')?.classList.add('ready');
 
   // Register service worker
   if ('serviceWorker' in navigator) {
@@ -1272,6 +1547,49 @@ document.addEventListener('DOMContentLoaded', () => {
       const hidden = mobileSearchWrap.classList.toggle('hidden');
       if (!hidden) {
         mobileSearchInput?.focus();
+      }
+    }
+  });
+
+  // ── Auth-required call-to-action ─────────────────────
+  document.getElementById('auth-signin-btn')?.addEventListener('click', () => {
+    openDialog('login-dialog');
+  });
+
+  // ── Command palette ──────────────────────────────────
+  const commandInput = document.getElementById('command-input');
+  document.getElementById('command-btn')?.addEventListener('click', () => openCommandPalette(''));
+  document.getElementById('command-close-btn')?.addEventListener('click', () => closeDialog('command-dialog'));
+
+  commandInput?.addEventListener('input', e => {
+    renderCommandItems(e.target.value || '');
+  });
+
+  commandInput?.addEventListener('keydown', async e => {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setCommandActive(state.commandIndex + 1);
+      return;
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setCommandActive(state.commandIndex - 1);
+      return;
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closeDialog('command-dialog');
+      return;
+    }
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const item = state.commandItems[state.commandIndex];
+      if (!item) return;
+      closeDialog('command-dialog');
+      try {
+        await item.run();
+      } catch (err) {
+        showSnack('Command failed: ' + (err?.message || 'Unknown error'), 'error');
       }
     }
   });
@@ -1559,10 +1877,47 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // ── Keyboard navigation ───────────────────────────────
   document.addEventListener('keydown', e => {
-    if (e.key === 'Escape') {
-      clearSelection();
+    const key = (e.key || '').toLowerCase();
+    const inTyping = isTypingTarget(e.target);
+
+    if ((e.ctrlKey || e.metaKey) && key === 'k') {
+      e.preventDefault();
+      openCommandPalette('');
+      return;
     }
-    if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
+
+    if (e.key === 'Escape') {
+      if (document.getElementById('command-dialog')?.open) {
+        closeDialog('command-dialog');
+        return;
+      }
+      clearSelection();
+      return;
+    }
+
+    if (!inTyping && !e.ctrlKey && !e.metaKey && !e.altKey && key === '/') {
+      e.preventDefault();
+      const si = document.getElementById('search-input') || document.getElementById('mobile-search-input');
+      si?.focus();
+      si?.select?.();
+      return;
+    }
+
+    if (!inTyping && !e.ctrlKey && !e.metaKey && !e.altKey && key === 'u') {
+      e.preventDefault();
+      document.getElementById('file-input')?.click();
+      return;
+    }
+
+    if (!inTyping && !e.ctrlKey && !e.metaKey && !e.altKey && key === 'n') {
+      e.preventDefault();
+      document.getElementById('folder-name-input').value = '';
+      document.getElementById('cf-error').textContent = '';
+      openDialog('create-folder-dialog');
+      return;
+    }
+
+    if ((e.ctrlKey || e.metaKey) && key === 'a' && !inTyping) {
       e.preventDefault();
       const files = filteredAndSorted();
       files.forEach(f => state.selected.add(f.id));
@@ -1571,12 +1926,14 @@ document.addEventListener('DOMContentLoaded', () => {
         if (state.selected.has(id)) el.classList.add('selected');
       });
       updateSelectionToolbar();
+      return;
     }
-    if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
+
+    if ((e.ctrlKey || e.metaKey) && key === 'f') {
       e.preventDefault();
-      const si = document.getElementById('search-input');
+      const si = document.getElementById('search-input') || document.getElementById('mobile-search-input');
       si?.focus();
-      si?.select();
+      si?.select?.();
     }
   });
 
