@@ -71,12 +71,11 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let check_path = match &args.command {
-        Some(Command::Config {
+    let check_path = args.command.as_ref().map(|command| match command {
+        Command::Config {
             command: ConfigCommand::Check { config },
-        }) => Some(config.as_deref()),
-        None => None,
-    };
+        } => config.as_deref(),
+    });
 
     // Setup logging
     let filter = if args.debug { "debug" } else { "info" };
@@ -88,11 +87,7 @@ async fn main() -> anyhow::Result<()> {
     let requested_path = check_path
         .flatten()
         .or_else(|| (!args.config.is_empty()).then_some(args.config.as_str()));
-    let cfg = config::load(if requested_path.is_none() {
-        None
-    } else {
-        requested_path
-    })?;
+    let cfg = config::load(requested_path)?;
     cfg.validate()?;
 
     if check_path.is_some() {
