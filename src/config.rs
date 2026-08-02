@@ -257,13 +257,15 @@ impl Config {
             &self.frontend.ftp.password,
             &mut errors,
         );
-        validate_credentials(
-            "HTTP",
-            &self.frontend.http.addr,
-            &self.frontend.http.username,
-            &self.frontend.http.password,
-            &mut errors,
-        );
+        if !self.frontend.http.guest_mode {
+            validate_credentials(
+                "HTTP",
+                &self.frontend.http.addr,
+                &self.frontend.http.username,
+                &self.frontend.http.password,
+                &mut errors,
+            );
+        }
 
         let tls = [
             &self.frontend.http.https_addr,
