@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use sqlx::{Postgres, QueryBuilder, Row as _};
 use std::sync::Arc;
 
-use crate::dataprovider::{DataProvider, DataProviderError, File, Result};
+use crate::dataprovider::{DataProvider, DataProviderError, DueNodeGroup, File, Result};
 use crate::ddrv::{Driver, Node};
 
 // ── error mapping ─────────────────────────────────────────────────────────────
@@ -81,6 +81,10 @@ impl PgProvider {
         let pool = sqlx::PgPool::connect(&config.db_url)
             .await
             .expect("postgres connect failed");
+        sqlx::query("CREATE INDEX IF NOT EXISTS node_expiry_file_idx ON node (ex, file)")
+            .execute(&pool)
+            .await
+            .expect("create node expiry index failed");
         PgProvider { pool, driver }
     }
 }
@@ -373,6 +377,92 @@ impl DataProvider for PgProvider {
             .map_err(map_sqlx_err)?;
 
         Ok(())
+    }
+
+    async fn due_node_groups(
+        &self,
+        expires_before: i64,
+        limit: usize,
+    ) -> Result<Vec<DueNodeGroup>> {
+        let rows = sqlx::query(
+            r#"SELECT file, MIN(ex) AS min_expiry
+               FROM node
+               WHERE ex > 0 AND ex <= $1
+               GROUP BY file
+               ORDER BY min_expiry
+               LIMIT $2"#,
+        )
+        .bind(expires_before)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx_err)?;
+        rows.iter()
+            .map(|row| {
+                Ok(DueNodeGroup {
+                    file_id: row
+                        .try_get::<uuid::Uuid, _>("file")
+                        .map_err(map_sqlx_err)?
+                        .to_string(),
+                    min_expiry: row.try_get("min_expiry").map_err(map_sqlx_err)?,
+                })
+            })
+            .collect()
+    }
+
+    async fn renew_node_group(&self, id: &str, expires_before: i64) -> Result<bool> {
+        let file = parse_uuid(id)?;
+        let mut transaction = self.pool.begin().await.map_err(map_sqlx_err)?;
+        // Transaction-scoped advisory locks are automatically released on every
+        // exit path and prevent multiple replicas from renewing the same file.
+        let locked: bool =
+            sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))")
+                .bind(id)
+                .fetch_one(&mut *transaction)
+                .await
+                .map_err(map_sqlx_err)?;
+        if !locked {
+            return Ok(false);
+        }
+        let rows = sqlx::query(
+            r#"SELECT id, url, size, "start", "end", mid, ex, "is", hm
+               FROM node WHERE file = $1 ORDER BY id"#,
+        )
+        .bind(file)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(map_sqlx_err)?;
+        let mut nodes = rows.iter().map(row_to_node).collect::<Result<Vec<_>>>()?;
+        if nodes
+            .iter()
+            .filter_map(|node| (node.ex > 0).then_some(node.ex))
+            .min()
+            .is_none_or(|expiry| expiry > expires_before)
+        {
+            return Ok(false);
+        }
+        self.driver
+            .update_nodes(&mut nodes)
+            .await
+            .map_err(|error| DataProviderError::Other(error.to_string()))?;
+        let mut query: QueryBuilder<Postgres> = QueryBuilder::new(
+            r#"UPDATE node AS n SET url = v.url, ex = v.ex, "is" = v.is, hm = v.hm FROM ("#,
+        );
+        query.push_values(nodes.iter(), |mut row, node| {
+            row.push_bind(node.nid)
+                .push_bind(&node.url)
+                .push_bind(node.ex)
+                .push_bind(node.is)
+                .push_bind(&node.hm);
+        });
+        query.push(r#") AS v(id, url, ex, "is", hm) WHERE n.id = v.id"#);
+        query
+            .build()
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_sqlx_err)?;
+        transaction.commit().await.map_err(map_sqlx_err)?;
+        Ok(true)
     }
 
     // ── path-based ops ────────────────────────────────────────────────────────

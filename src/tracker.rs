@@ -1,70 +1,119 @@
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
+use futures::{stream::FuturesUnordered, StreamExt};
+use rand::Rng;
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use crate::dataprovider::{self, nodes_need_refresh, DataProvider, DataProviderError, File};
+use crate::dataprovider::{self, DataProvider, NODE_RENEWAL_HEADROOM_SECS};
 
-const DEFAULT_SCAN_INTERVAL: Duration = Duration::from_secs(300);
+const BATCH_SIZE: usize = 64;
+const MAX_CONCURRENCY: usize = 8;
+const POLL_INTERVAL: Duration = Duration::from_secs(30);
+const MAX_JITTER: Duration = Duration::from_secs(10);
+const MAX_RETRY: Duration = Duration::from_secs(15 * 60);
 
-/// Spawn a background task that walks all files and refreshes expiring Discord URLs.
-pub fn spawn_auto_renewal_task() {
-    // Clone the provider once; it lives for the lifetime of the process.
-    let provider = dataprovider::get();
-
-    tokio::spawn(async move {
-        loop {
-            if let Err(e) = refresh_all_files(&provider).await {
-                warn!(error = %e, "file tracker refresh pass failed");
-            }
-            tokio::time::sleep(DEFAULT_SCAN_INTERVAL).await;
-        }
-    });
+#[derive(Clone, Copy)]
+struct RetryState {
+    attempts: u32,
+    retry_at: tokio::time::Instant,
 }
 
-async fn refresh_all_files(provider: &Arc<dyn DataProvider>) -> Result<(), DataProviderError> {
-    let mut stack: Vec<File> = Vec::new();
-    let mut dirs_scanned: usize = 0;
-    let mut files_scanned: usize = 0;
-    let mut refresh_errors: usize = 0;
+/// Spawn the indexed renewal worker. Cancelling `shutdown` stops polling and
+/// aborts outstanding renewals at their next cancellation point.
+pub fn spawn_auto_renewal_task(shutdown: CancellationToken) -> JoinHandle<()> {
+    let provider = dataprovider::get();
+    tokio::spawn(run(provider, shutdown))
+}
 
-    // Start from root and walk depth-first.
-    let root = provider.stat("/").await?;
-    stack.push(root);
-
-    while let Some(entry) = stack.pop() {
-        if entry.dir {
-            dirs_scanned += 1;
-            match provider.get_children(&entry.id).await {
-                Ok(children) => stack.extend(children),
-                Err(e) => {
-                    refresh_errors += 1;
-                    warn!(dir_id = %entry.id, error = %e, "failed to list directory")
-                }
-            }
-            continue;
+async fn run(provider: Arc<dyn DataProvider>, shutdown: CancellationToken) {
+    let mut retries = HashMap::<String, RetryState>::new();
+    loop {
+        let jitter =
+            Duration::from_millis(rand::thread_rng().gen_range(0..=MAX_JITTER.as_millis() as u64));
+        tokio::select! {
+            _ = shutdown.cancelled() => break,
+            _ = tokio::time::sleep(POLL_INTERVAL + jitter) => {}
         }
 
-        files_scanned += 1;
-
-        match provider.get_nodes(&entry.id).await {
-            Ok(nodes) => {
-                debug!(
-                    file_id = %entry.id,
-                    needs_refresh_now = nodes_need_refresh(&nodes),
-                    "tracker visited file nodes"
-                );
+        let cutoff = chrono::Utc::now().timestamp() + NODE_RENEWAL_HEADROOM_SECS;
+        let candidates = match provider.due_node_groups(cutoff, BATCH_SIZE * 4).await {
+            Ok(candidates) => candidates,
+            Err(error) => {
+                metrics::counter!("ddrv_renewal_failures_total", "stage" => "query").increment(1);
+                warn!(%error, "renewal queue query failed");
+                continue;
             }
-            Err(e) => {
-                refresh_errors += 1;
-                warn!(file_id = %entry.id, error = %e, "failed to refresh nodes")
+        };
+        let queue_depth = candidates.len();
+        let oldest_due = candidates.first().map(|item| item.min_expiry).unwrap_or(0);
+        metrics::gauge!("ddrv_renewal_queue_depth").set(queue_depth as f64);
+        metrics::gauge!("ddrv_renewal_oldest_due_timestamp_seconds").set(oldest_due as f64);
+        info!(
+            queue_depth,
+            oldest_due,
+            provider = provider.name(),
+            "renewal queue sampled"
+        );
+
+        let now = tokio::time::Instant::now();
+        let batch = candidates
+            .into_iter()
+            .filter(|item| {
+                retries
+                    .get(&item.file_id)
+                    .is_none_or(|retry| retry.retry_at <= now)
+            })
+            .take(BATCH_SIZE)
+            .collect::<Vec<_>>();
+        let mut pending = batch.into_iter();
+        let mut active = FuturesUnordered::new();
+
+        loop {
+            while active.len() < MAX_CONCURRENCY {
+                let Some(item) = pending.next() else { break };
+                let provider = Arc::clone(&provider);
+                let shutdown = shutdown.clone();
+                active.push(async move {
+                    let started = std::time::Instant::now();
+                    let result = tokio::select! {
+                        _ = shutdown.cancelled() => None,
+                        result = provider.renew_node_group(&item.file_id, cutoff) => Some(result),
+                    };
+                    (item, started.elapsed(), result)
+                });
+            }
+            let Some((item, latency, result)) = active.next().await else {
+                break;
+            };
+            metrics::histogram!("ddrv_renewal_latency_seconds").record(latency.as_secs_f64());
+            match result {
+                None => return,
+                Some(Ok(renewed)) => {
+                    retries.remove(&item.file_id);
+                    debug!(file_id = %item.file_id, renewed, latency_ms = latency.as_millis(), "renewal finished");
+                }
+                Some(Err(error)) => {
+                    metrics::counter!("ddrv_renewal_failures_total", "stage" => "renew")
+                        .increment(1);
+                    let attempts = retries
+                        .get(&item.file_id)
+                        .map_or(1, |state| state.attempts.saturating_add(1));
+                    let delay = Duration::from_secs(
+                        (5_u64.saturating_mul(1_u64 << attempts.min(8))).min(MAX_RETRY.as_secs()),
+                    );
+                    retries.insert(
+                        item.file_id.clone(),
+                        RetryState {
+                            attempts,
+                            retry_at: tokio::time::Instant::now() + delay,
+                        },
+                    );
+                    warn!(file_id = %item.file_id, %error, attempts, retry_in_secs = delay.as_secs(), latency_ms = latency.as_millis(), "node renewal failed; retry scheduled");
+                }
             }
         }
     }
-
-    info!(
-        dirs_scanned,
-        files_scanned, refresh_errors, "tracker renewal cycle finished"
-    );
-
-    Ok(())
+    info!("renewal tracker stopped");
 }
