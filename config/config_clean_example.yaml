@@ -23,6 +23,8 @@ frontend:
     https_crtpath:
     https_keypath:
     username: username
-    password: password
+    password_hash: "$argon2id$v=19$m=19456,t=2,p=1$<salt>$<hash>"
+    jwt_secret_file: /run/secrets/ddrv_jwt
+    access_token_ttl_seconds: 900
     guest_mode: true
     async_write: false

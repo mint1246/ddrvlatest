@@ -115,7 +115,7 @@ pub struct FtpConfig {
     pub async_write: bool,
 }
 
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Deserialize, Clone)]
 pub struct HttpConfig {
     #[serde(default)]
     pub addr: String,
@@ -127,11 +127,60 @@ pub struct HttpConfig {
     #[serde(default)]
     pub username: String,
     #[serde(default)]
-    pub password: String,
+    pub password_hash: String,
+    /// Dedicated JWT signing secret. Prefer `jwt_secret_file` or HTTP_JWT_SECRET.
+    #[serde(default)]
+    pub jwt_secret: String,
+    #[serde(default)]
+    pub jwt_secret_file: Option<String>,
+    #[serde(default = "default_access_token_ttl_seconds")]
+    pub access_token_ttl_seconds: u64,
     #[serde(default)]
     pub guest_mode: bool,
     #[serde(default)]
     pub async_write: bool,
+}
+
+impl std::fmt::Debug for HttpConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpConfig")
+            .field("addr", &self.addr)
+            .field("https_addr", &self.https_addr)
+            .field("https_keypath", &self.https_keypath)
+            .field("https_crtpath", &self.https_crtpath)
+            .field("cdn_proxy_base", &self.cdn_proxy_base)
+            .field("username", &self.username)
+            .field("password_hash", &"[REDACTED]")
+            .field("jwt_secret", &"[REDACTED]")
+            .field("jwt_secret_file", &self.jwt_secret_file)
+            .field("access_token_ttl_seconds", &self.access_token_ttl_seconds)
+            .field("guest_mode", &self.guest_mode)
+            .field("async_write", &self.async_write)
+            .finish()
+    }
+}
+
+impl Default for HttpConfig {
+    fn default() -> Self {
+        Self {
+            addr: String::new(),
+            https_addr: None,
+            https_keypath: None,
+            https_crtpath: None,
+            cdn_proxy_base: None,
+            username: String::new(),
+            password_hash: String::new(),
+            jwt_secret: String::new(),
+            jwt_secret_file: None,
+            access_token_ttl_seconds: default_access_token_ttl_seconds(),
+            guest_mode: false,
+            async_write: false,
+        }
+    }
+}
+
+fn default_access_token_ttl_seconds() -> u64 {
+    900
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
@@ -199,8 +248,20 @@ pub fn load(config_path: Option<&str>) -> anyhow::Result<Config> {
     if let Ok(v) = std::env::var("HTTP_USERNAME") {
         builder = builder.set_override("frontend.http.username", v)?;
     }
-    if let Ok(v) = std::env::var("HTTP_PASSWORD") {
-        builder = builder.set_override("frontend.http.password", v)?;
+    if std::env::var("HTTP_PASSWORD").is_ok() {
+        anyhow::bail!("HTTP_PASSWORD is no longer supported; configure HTTP_PASSWORD_HASH with an Argon2id PHC string");
+    }
+    if let Ok(v) = std::env::var("HTTP_PASSWORD_HASH") {
+        builder = builder.set_override("frontend.http.password_hash", v)?;
+    }
+    if let Ok(v) = std::env::var("HTTP_JWT_SECRET_FILE") {
+        builder = builder.set_override("frontend.http.jwt_secret_file", v)?;
+    }
+    if let Ok(v) = std::env::var("HTTP_JWT_SECRET") {
+        builder = builder.set_override("frontend.http.jwt_secret", v)?;
+    }
+    if let Ok(v) = std::env::var("HTTP_ACCESS_TOKEN_TTL_SECONDS") {
+        builder = builder.set_override("frontend.http.access_token_ttl_seconds", v)?;
     }
     if let Ok(v) = std::env::var("HTTP_GUEST_MODE") {
         builder = builder.set_override("frontend.http.guest_mode", v)?;
@@ -218,6 +279,12 @@ pub fn load(config_path: Option<&str>) -> anyhow::Result<Config> {
         builder = builder.set_override("frontend.http.https_keypath", v)?;
     }
 
-    let cfg: Config = builder.build()?.try_deserialize()?;
+    let mut cfg: Config = builder.build()?.try_deserialize()?;
+    if let Some(path) = cfg.frontend.http.jwt_secret_file.as_deref() {
+        cfg.frontend.http.jwt_secret = std::fs::read_to_string(path)
+            .map_err(|e| anyhow::anyhow!("failed to read HTTP JWT secret file {path}: {e}"))?
+            .trim_end_matches(['\r', '\n'])
+            .to_owned();
+    }
     Ok(cfg)
 }
