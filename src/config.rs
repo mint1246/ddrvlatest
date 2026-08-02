@@ -104,7 +104,7 @@ pub struct FtpConfig {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Deserialize, Clone)]
 pub struct HttpConfig {
     #[serde(default)]
     pub addr: String,
