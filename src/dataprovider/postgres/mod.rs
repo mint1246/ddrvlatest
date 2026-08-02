@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sqlx::{Postgres, QueryBuilder, Row as _};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::dataprovider::{DataProvider, DataProviderError, File, Result};
@@ -167,17 +168,21 @@ impl DataProvider for PgProvider {
         let new_parent = file.parent.as_deref().map(parse_uuid).transpose()?;
         let mut tx = self.pool.begin().await.map_err(map_sqlx_err)?;
 
-        let source = sqlx::query("SELECT parent FROM fs WHERE id = $1 FOR UPDATE")
+        let source = sqlx::query("SELECT parent, dir FROM fs WHERE id = $1 FOR UPDATE")
             .bind(uuid)
             .fetch_one(&mut *tx)
             .await
             .map_err(map_sqlx_err)?;
         let current_parent: Option<uuid::Uuid> = source.try_get("parent").map_err(map_sqlx_err)?;
+        let source_dir: bool = source.try_get("dir").map_err(map_sqlx_err)?;
         if expected_parent.is_some() && current_parent != expected_parent {
             return Err(DataProviderError::InvalidParent);
         }
 
         let destination_id = new_parent.ok_or(DataProviderError::InvalidParent)?;
+        if destination_id == uuid {
+            return Err(DataProviderError::InvalidParent);
+        }
         let destination = sqlx::query("SELECT dir FROM fs WHERE id = $1 FOR UPDATE")
             .bind(destination_id)
             .fetch_optional(&mut *tx)
@@ -189,6 +194,22 @@ impl DataProvider for PgProvider {
             .map_err(map_sqlx_err)?
         {
             return Err(DataProviderError::InvalidParent);
+        }
+
+        if source_dir {
+            let mut seen = HashSet::new();
+            let mut ancestor = Some(destination_id);
+            while let Some(current) = ancestor {
+                if !seen.insert(current) || current == uuid {
+                    return Err(DataProviderError::InvalidParent);
+                }
+                let row = sqlx::query("SELECT parent FROM fs WHERE id = $1 FOR UPDATE")
+                    .bind(current)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .map_err(map_sqlx_err)?;
+                ancestor = row.try_get("parent").map_err(map_sqlx_err)?;
+            }
         }
 
         let collision: bool = sqlx::query_scalar(

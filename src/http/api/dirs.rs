@@ -88,8 +88,14 @@ pub async fn update_dir_handler(
         }
         dir.name = name;
     }
-    let parent = body.parent.as_deref();
-    match dp.update(&id, parent, &dir).await {
+    let expected_parent = dir.parent.clone();
+    if let Some(parent) = body.parent {
+        if parent.trim().is_empty() || parent.chars().any(char::is_control) {
+            return err(StatusCode::BAD_REQUEST, "invalid parent");
+        }
+        dir.parent = Some(parent);
+    }
+    match dp.update(&id, expected_parent.as_deref(), &dir).await {
         Ok(f) => ApiResponse::ok(f).into_response(),
         Err(e) => dp_err(e),
     }
