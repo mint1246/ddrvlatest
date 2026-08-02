@@ -913,6 +913,7 @@ impl DataProvider for BoltDbProvider {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod backend_contract_tests {
     use super::*;
     use crate::ddrv::{Config, TOKEN_BOT};
