@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sqlx::{Postgres, QueryBuilder, Row as _};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::dataprovider::{DataProvider, DataProviderError, File, Result};
@@ -161,9 +162,68 @@ impl DataProvider for PgProvider {
         row_to_file(&row)
     }
 
-    async fn update(&self, id: &str, _parent: Option<&str>, file: &File) -> Result<File> {
+    async fn update(&self, id: &str, parent: Option<&str>, file: &File) -> Result<File> {
         let uuid = parse_uuid(id)?;
+        let expected_parent = parent.map(parse_uuid).transpose()?;
         let new_parent = file.parent.as_deref().map(parse_uuid).transpose()?;
+        let mut tx = self.pool.begin().await.map_err(map_sqlx_err)?;
+
+        let source = sqlx::query("SELECT parent, dir FROM fs WHERE id = $1 FOR UPDATE")
+            .bind(uuid)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(map_sqlx_err)?;
+        let current_parent: Option<uuid::Uuid> = source.try_get("parent").map_err(map_sqlx_err)?;
+        let source_dir: bool = source.try_get("dir").map_err(map_sqlx_err)?;
+        if expected_parent.is_some() && current_parent != expected_parent {
+            return Err(DataProviderError::InvalidParent);
+        }
+
+        let destination_id = new_parent.ok_or(DataProviderError::InvalidParent)?;
+        if destination_id == uuid {
+            return Err(DataProviderError::InvalidParent);
+        }
+        let destination = sqlx::query("SELECT dir FROM fs WHERE id = $1 FOR UPDATE")
+            .bind(destination_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(map_sqlx_err)?
+            .ok_or(DataProviderError::InvalidParent)?;
+        if !destination
+            .try_get::<bool, _>("dir")
+            .map_err(map_sqlx_err)?
+        {
+            return Err(DataProviderError::InvalidParent);
+        }
+
+        if source_dir {
+            let mut seen = HashSet::new();
+            let mut ancestor = Some(destination_id);
+            while let Some(current) = ancestor {
+                if !seen.insert(current) || current == uuid {
+                    return Err(DataProviderError::InvalidParent);
+                }
+                let row = sqlx::query("SELECT parent FROM fs WHERE id = $1 FOR UPDATE")
+                    .bind(current)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .map_err(map_sqlx_err)?;
+                ancestor = row.try_get("parent").map_err(map_sqlx_err)?;
+            }
+        }
+
+        let collision: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM fs WHERE parent = $1 AND name = $2 AND id <> $3)",
+        )
+        .bind(destination_id)
+        .bind(&file.name)
+        .bind(uuid)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(map_sqlx_err)?;
+        if collision {
+            return Err(DataProviderError::AlreadyExists);
+        }
 
         let row = sqlx::query(
             "UPDATE fs SET name = $1, parent = $2, mtime = NOW()
@@ -173,11 +233,21 @@ impl DataProvider for PgProvider {
         .bind(&file.name)
         .bind(new_parent)
         .bind(uuid)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await
-        .map_err(map_sqlx_err)?;
+        .map_err(|e| match e {
+            sqlx::Error::Database(ref dbe) if dbe.code().as_deref() == Some("23505") => {
+                DataProviderError::AlreadyExists
+            }
+            sqlx::Error::Database(ref dbe) if dbe.code().as_deref() == Some("23503") => {
+                DataProviderError::InvalidParent
+            }
+            e => map_sqlx_err(e),
+        })?;
 
-        row_to_file(&row)
+        let updated = row_to_file(&row)?;
+        tx.commit().await.map_err(map_sqlx_err)?;
+        Ok(updated)
     }
 
     async fn delete(&self, id: &str, parent: Option<&str>) -> Result<()> {
