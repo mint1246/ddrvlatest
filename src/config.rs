@@ -48,7 +48,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::Config;
+    use super::{Config, HttpConfig};
 
     #[test]
     fn token_accepts_single_string() {
@@ -91,7 +91,6 @@ frontend:
   http:
     addr: ""
     cdn_proxy_base: file:///tmp/nope
-    https_addr: ":443"
 "#;
         let cfg: Config = serde_yaml::from_str(raw).unwrap();
         let report = cfg.validate().unwrap_err().to_string();
@@ -100,7 +99,6 @@ frontend:
             "valid socket address",
             "valid start-end range",
             "FTP username and password",
-            "must either all be set",
             "chunk_size",
             "duplicate value",
             "channels must not be empty",
@@ -126,6 +124,27 @@ frontend:
             assert!(!rendered.contains(secret));
         }
         assert!(rendered.contains("<redacted>"));
+    }
+
+    #[test]
+    fn http_config_rejects_removed_tls_settings() {
+        let raw = r#"
+addr: ":2526"
+https_addr: ":443"
+https_crtpath: cert.pem
+https_keypath: key.pem
+"#;
+
+        let error = serde_yaml::from_str::<HttpConfig>(raw)
+            .expect_err("unsupported TLS settings should be rejected");
+        let message = error.to_string();
+        assert!(message.contains("unknown field"));
+        assert!(
+            ["https_addr", "https_crtpath", "https_keypath"]
+                .iter()
+                .any(|field| message.contains(field)),
+            "unexpected error: {message}"
+        );
     }
 }
 
@@ -191,12 +210,12 @@ pub struct FtpConfig {
 
 #[allow(dead_code)]
 #[derive(Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
+// Config is intentionally deserialized with strict field checking so removed
+// TLS settings cannot silently re-enable a mode the server no longer serves.
 pub struct HttpConfig {
     #[serde(default)]
     pub addr: String,
-    pub https_addr: Option<String>,
-    pub https_keypath: Option<String>,
-    pub https_crtpath: Option<String>,
     #[serde(default)]
     pub cdn_proxy_base: Option<String>,
     #[serde(default)]
@@ -220,9 +239,6 @@ impl std::fmt::Debug for HttpConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HttpConfig")
             .field("addr", &self.addr)
-            .field("https_addr", &self.https_addr)
-            .field("https_keypath", &self.https_keypath)
-            .field("https_crtpath", &self.https_crtpath)
             .field("cdn_proxy_base", &self.cdn_proxy_base)
             .field("username", &self.username)
             .field("password_hash", &"[REDACTED]")
@@ -239,9 +255,6 @@ impl Default for HttpConfig {
     fn default() -> Self {
         Self {
             addr: String::new(),
-            https_addr: None,
-            https_keypath: None,
-            https_crtpath: None,
             cdn_proxy_base: None,
             username: String::new(),
             password_hash: String::new(),
@@ -284,10 +297,6 @@ impl Config {
         ] {
             validate_addr(name, addr, &mut errors);
         }
-        if let Some(addr) = self.frontend.http.https_addr.as_deref() {
-            validate_addr("frontend.http.https_addr", addr, &mut errors);
-        }
-
         if let Some(range) = self.frontend.ftp.port_range.as_deref() {
             let valid = range
                 .split_once('-')
@@ -316,19 +325,6 @@ impl Config {
                 &self.frontend.http.password_hash,
                 &mut errors,
             );
-        }
-
-        let tls = [
-            &self.frontend.http.https_addr,
-            &self.frontend.http.https_keypath,
-            &self.frontend.http.https_crtpath,
-        ];
-        let tls_count = tls
-            .iter()
-            .filter(|v| v.as_ref().is_some_and(|s| !s.trim().is_empty()))
-            .count();
-        if tls_count != 0 && tls_count != 3 {
-            errors.push("HTTPS address, certificate, and private key must either all be set or all be omitted".into());
         }
 
         let max_chunk = match self.ddrv.token_type {
@@ -552,6 +548,8 @@ pub fn load(config_path: Option<&str>) -> anyhow::Result<Config> {
     if let Ok(v) = std::env::var("HTTP_ASYNC_WRITE") {
         builder = builder.set_override("frontend.http.async_write", v)?;
     }
+    // Preserve the former environment-variable mappings solely so obsolete TLS
+    // configuration is rejected by HttpConfig instead of being silently ignored.
     if let Ok(v) = std::env::var("HTTPS_ADDR") {
         builder = builder.set_override("frontend.http.https_addr", v)?;
     }

@@ -80,20 +80,8 @@ frontend:
     #   https://your-worker.workers.dev/?url=https%3A%2F%2Fcdn.discordapp.com%2F...
     # Env: CDN_PROXY_BASE
     cdn_proxy_base:
-    # HTTPS server address configuration.
-    # Format: ":port" (e.g., ":443").
-    # This is typically set to port 443 for HTTPS.
-    # Note: HTTPS server will only start if `https_addr`, `https_keypath`, and `https_crtpath` are all provided.
-    # Env: HTTPS_ADDR
-    # https_addr: ":443"
-    # Path to the HTTPS certificate file.
-    # This certificate is used in SSL/TLS for HTTPS to verify the server's identity.
-    # Env: HTTPS_CRTPATH
-    https_crtpath:
-    # Path to the HTTPS private key file.
-    # This key is part of the SSL/TLS certification used for securing HTTPS connections.
-    # Env: HTTPS_KEYPATH
-    https_keypath:
+    # TLS is not terminated by ddrv. Put this HTTP listener behind a TLS-capable
+    # reverse proxy (such as Caddy, nginx, or a cloud load balancer) for HTTPS.
     # If username and password both are blank, authentication will be disabled
     # HTTP server username.
     # Env: HTTP_USERNAME
