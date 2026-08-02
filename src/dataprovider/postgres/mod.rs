@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sqlx::{Postgres, QueryBuilder, Row as _};
 use std::sync::Arc;
+use tracing::warn;
 
 use crate::dataprovider::{DataProvider, DataProviderError, DueNodeGroup, File, Result};
 use crate::ddrv::{Driver, Node};
@@ -81,10 +82,13 @@ impl PgProvider {
         let pool = sqlx::PgPool::connect(&config.db_url)
             .await
             .expect("postgres connect failed");
-        sqlx::query("CREATE INDEX IF NOT EXISTS node_expiry_file_idx ON node (ex, file)")
-            .execute(&pool)
-            .await
-            .expect("create node expiry index failed");
+        if let Err(error) =
+            sqlx::query("CREATE INDEX IF NOT EXISTS node_expiry_file_idx ON node (ex, file)")
+                .execute(&pool)
+                .await
+        {
+            warn!(%error, "unable to create node expiry index; continuing without it");
+        }
         PgProvider { pool, driver }
     }
 }

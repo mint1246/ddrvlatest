@@ -13,11 +13,13 @@ const MAX_CONCURRENCY: usize = 8;
 const POLL_INTERVAL: Duration = Duration::from_secs(30);
 const MAX_JITTER: Duration = Duration::from_secs(10);
 const MAX_RETRY: Duration = Duration::from_secs(15 * 60);
+const RETRY_STATE_TTL: Duration = Duration::from_secs(60 * 60);
 
 #[derive(Clone, Copy)]
 struct RetryState {
     attempts: u32,
     retry_at: tokio::time::Instant,
+    last_seen: tokio::time::Instant,
 }
 
 /// Spawn the indexed renewal worker. Cancelling `shutdown` stops polling and
@@ -46,18 +48,24 @@ async fn run(provider: Arc<dyn DataProvider>, shutdown: CancellationToken) {
                 continue;
             }
         };
-        let queue_depth = candidates.len();
+        let sample_size = candidates.len();
         let oldest_due = candidates.first().map(|item| item.min_expiry).unwrap_or(0);
-        metrics::gauge!("ddrv_renewal_queue_depth").set(queue_depth as f64);
+        metrics::gauge!("ddrv_renewal_sample_size").set(sample_size as f64);
         metrics::gauge!("ddrv_renewal_oldest_due_timestamp_seconds").set(oldest_due as f64);
         info!(
-            queue_depth,
+            sample_size,
             oldest_due,
             provider = provider.name(),
-            "renewal queue sampled"
+            "renewal queue sample collected"
         );
 
         let now = tokio::time::Instant::now();
+        retries.retain(|_, state| now.duration_since(state.last_seen) <= RETRY_STATE_TTL);
+        for item in &candidates {
+            if let Some(state) = retries.get_mut(&item.file_id) {
+                state.last_seen = now;
+            }
+        }
         let batch = candidates
             .into_iter()
             .filter(|item| {
@@ -108,6 +116,7 @@ async fn run(provider: Arc<dyn DataProvider>, shutdown: CancellationToken) {
                         RetryState {
                             attempts,
                             retry_at: tokio::time::Instant::now() + delay,
+                            last_seen: tokio::time::Instant::now(),
                         },
                     );
                     warn!(file_id = %item.file_id, %error, attempts, retry_in_secs = delay.as_secs(), latency_ms = latency.as_millis(), "node renewal failed; retry scheduled");

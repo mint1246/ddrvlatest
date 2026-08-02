@@ -120,6 +120,7 @@ async fn main() -> anyhow::Result<()> {
         _ = tokio::signal::ctrl_c() => {},
     }
     tracker_shutdown.cancel();
+    tracker_task.abort();
     let _ = tracker_task.await;
 
     Ok(())

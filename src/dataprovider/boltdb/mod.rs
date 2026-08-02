@@ -14,6 +14,7 @@ use crate::ddrv::{Driver, Node};
 const FS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("fs");
 const NODES_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("nodes");
 const EXPIRY_TABLE: TableDefinition<&str, &str> = TableDefinition::new("node_expiry");
+const EXPIRY_PATH_TABLE: TableDefinition<&str, &str> = TableDefinition::new("node_expiry_path");
 const ROOT: &str = "/";
 
 // ── serialisation types ──────────────────────────────────────────────────────
@@ -174,23 +175,20 @@ fn minimum_expiry(nodes: &[Node]) -> Option<i64> {
 }
 
 fn replace_expiry_index(
-    table: &mut Table<'_, &str, &str>,
+    expiry_table: &mut Table<'_, &str, &str>,
+    path_table: &mut Table<'_, &str, &str>,
     path: &str,
     nodes: &[Node],
 ) -> Result<()> {
-    let stale = table
-        .iter()?
-        .filter_map(|row| match row {
-            Ok((key, value)) if value.value() == path => Some(Ok(key.value().to_owned())),
-            Ok(_) => None,
-            Err(error) => Some(Err(error)),
-        })
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    for key in stale {
-        table.remove(key.as_str())?;
+    let previous_key = path_table.get(path)?.map(|key| key.value().to_owned());
+    if let Some(previous_key) = previous_key {
+        expiry_table.remove(previous_key.as_str())?;
+        path_table.remove(path)?;
     }
     if let Some(expiry) = minimum_expiry(nodes) {
-        table.insert(expiry_key(expiry, path).as_str(), path)?;
+        let key = expiry_key(expiry, path);
+        expiry_table.insert(key.as_str(), path)?;
+        path_table.insert(path, key.as_str())?;
     }
     Ok(())
 }
@@ -211,6 +209,7 @@ impl BoltDbProvider {
         {
             let nodes = write_txn.open_table(NODES_TABLE)?;
             let mut expiry = write_txn.open_table(EXPIRY_TABLE)?;
+            let mut expiry_paths = write_txn.open_table(EXPIRY_PATH_TABLE)?;
             // Rebuild on open so databases created by older releases acquire a
             // correct index without a separate migration step.
             let old_keys = expiry
@@ -220,6 +219,13 @@ impl BoltDbProvider {
             for key in old_keys {
                 expiry.remove(key.as_str())?;
             }
+            let old_paths = expiry_paths
+                .iter()?
+                .map(|row| row.map(|(path, _)| path.value().to_owned()))
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            for path in old_paths {
+                expiry_paths.remove(path.as_str())?;
+            }
             let mut current_path = None::<String>;
             let mut current_nodes = Vec::new();
             for row in nodes.iter()? {
@@ -227,7 +233,12 @@ impl BoltDbProvider {
                 let path = key.value().split_once('\0').map(|(p, _)| p).unwrap_or("");
                 if current_path.as_deref() != Some(path) {
                     if let Some(previous) = current_path.take() {
-                        replace_expiry_index(&mut expiry, &previous, &current_nodes)?;
+                        replace_expiry_index(
+                            &mut expiry,
+                            &mut expiry_paths,
+                            &previous,
+                            &current_nodes,
+                        )?;
                         current_nodes.clear();
                     }
                     current_path = Some(path.to_owned());
@@ -236,7 +247,7 @@ impl BoltDbProvider {
                 current_nodes.push(stored_node_to_node(stored));
             }
             if let Some(previous) = current_path {
-                replace_expiry_index(&mut expiry, &previous, &current_nodes)?;
+                replace_expiry_index(&mut expiry, &mut expiry_paths, &previous, &current_nodes)?;
             }
             let mut fs_table = write_txn.open_table(FS_TABLE)?;
             if fs_table.get(ROOT)?.is_none() {
@@ -430,7 +441,11 @@ impl DataProvider for BoltDbProvider {
                         table.insert(key.as_str(), data.as_slice())?;
                     }
                 }
-                replace_expiry_index(&mut write_txn.open_table(EXPIRY_TABLE)?, &path2, &updated)?;
+                {
+                    let mut expiry = write_txn.open_table(EXPIRY_TABLE)?;
+                    let mut expiry_paths = write_txn.open_table(EXPIRY_PATH_TABLE)?;
+                    replace_expiry_index(&mut expiry, &mut expiry_paths, &path2, &updated)?;
+                }
                 write_txn.commit()?;
                 Ok(())
             })
@@ -510,7 +525,11 @@ impl DataProvider for BoltDbProvider {
                         table.insert(key.as_str(), data.as_slice())?;
                     }
                 }
-                replace_expiry_index(&mut write_txn.open_table(EXPIRY_TABLE)?, &path2, &updated)?;
+                {
+                    let mut expiry = write_txn.open_table(EXPIRY_TABLE)?;
+                    let mut expiry_paths = write_txn.open_table(EXPIRY_PATH_TABLE)?;
+                    replace_expiry_index(&mut expiry, &mut expiry_paths, &path2, &updated)?;
+                }
                 write_txn.commit()?;
                 Ok(())
             })
@@ -583,11 +602,11 @@ impl DataProvider for BoltDbProvider {
                 }
             }
             let indexed_nodes = collect_nodes(&write_txn.open_table(NODES_TABLE)?, &path)?;
-            replace_expiry_index(
-                &mut write_txn.open_table(EXPIRY_TABLE)?,
-                &path,
-                &indexed_nodes,
-            )?;
+            {
+                let mut expiry = write_txn.open_table(EXPIRY_TABLE)?;
+                let mut expiry_paths = write_txn.open_table(EXPIRY_PATH_TABLE)?;
+                replace_expiry_index(&mut expiry, &mut expiry_paths, &path, &indexed_nodes)?;
+            }
             write_txn.commit()?;
             Ok(())
         })
@@ -627,7 +646,11 @@ impl DataProvider for BoltDbProvider {
                     fs_table.insert(path.as_str(), data.as_slice())?;
                 }
             }
-            replace_expiry_index(&mut write_txn.open_table(EXPIRY_TABLE)?, &path, &[])?;
+            {
+                let mut expiry = write_txn.open_table(EXPIRY_TABLE)?;
+                let mut expiry_paths = write_txn.open_table(EXPIRY_PATH_TABLE)?;
+                replace_expiry_index(&mut expiry, &mut expiry_paths, &path, &[])?;
+            }
             write_txn.commit()?;
             Ok(())
         })
@@ -696,7 +719,11 @@ impl DataProvider for BoltDbProvider {
                     table.insert(node_key(&path, node.nid).as_str(), bytes.as_slice())?;
                 }
             }
-            replace_expiry_index(&mut transaction.open_table(EXPIRY_TABLE)?, &path, &nodes)?;
+            {
+                let mut expiry = transaction.open_table(EXPIRY_TABLE)?;
+                let mut expiry_paths = transaction.open_table(EXPIRY_PATH_TABLE)?;
+                replace_expiry_index(&mut expiry, &mut expiry_paths, &path, &nodes)?;
+            }
             transaction.commit()?;
             Ok(())
         })
@@ -875,8 +902,12 @@ impl DataProvider for BoltDbProvider {
                     nodes_table.remove(k.as_str())?;
                 }
             }
-            for path in &fs_paths {
-                replace_expiry_index(&mut write_txn.open_table(EXPIRY_TABLE)?, path, &[])?;
+            {
+                let mut expiry = write_txn.open_table(EXPIRY_TABLE)?;
+                let mut expiry_paths = write_txn.open_table(EXPIRY_PATH_TABLE)?;
+                for path in &fs_paths {
+                    replace_expiry_index(&mut expiry, &mut expiry_paths, path, &[])?;
+                }
             }
             write_txn.commit()?;
             Ok(())
@@ -964,10 +995,14 @@ impl DataProvider for BoltDbProvider {
                     nodes_table.remove(old_k.as_str())?;
                 }
             }
-            for (old_path, new_path, _) in &fs_moves {
-                replace_expiry_index(&mut write_txn.open_table(EXPIRY_TABLE)?, old_path, &[])?;
-                let nodes = collect_nodes(&write_txn.open_table(NODES_TABLE)?, new_path)?;
-                replace_expiry_index(&mut write_txn.open_table(EXPIRY_TABLE)?, new_path, &nodes)?;
+            {
+                let mut expiry = write_txn.open_table(EXPIRY_TABLE)?;
+                let mut expiry_paths = write_txn.open_table(EXPIRY_PATH_TABLE)?;
+                for (old_path, new_path, _) in &fs_moves {
+                    replace_expiry_index(&mut expiry, &mut expiry_paths, old_path, &[])?;
+                    let nodes = collect_nodes(&write_txn.open_table(NODES_TABLE)?, new_path)?;
+                    replace_expiry_index(&mut expiry, &mut expiry_paths, new_path, &nodes)?;
+                }
             }
             write_txn.commit()?;
             Ok(())
