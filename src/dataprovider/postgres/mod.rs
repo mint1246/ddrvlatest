@@ -466,3 +466,19 @@ impl DataProvider for PgProvider {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::parse_uuid;
+
+    #[test]
+    fn parse_uuid_accepts_uuid_ids() {
+        let id = "550e8400-e29b-41d4-a716-446655440000";
+        assert_eq!(parse_uuid(id).expect("uuid should parse").to_string(), id);
+    }
+
+    #[test]
+    fn parse_uuid_rejects_path_ids() {
+        assert!(parse_uuid("/folder/file").is_err());
+    }
+}

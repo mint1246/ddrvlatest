@@ -157,15 +157,39 @@ fn stage_legacy_input(workdir: &Path, input: &Path) -> Result<std::path::PathBuf
             input.display()
         )
     })?;
-    let mut staged_perms = fs::metadata(&staged_input)
+    if fs::metadata(&staged_input)
         .with_context(|| format!("read staged input metadata {}", staged_input.display()))?
-        .permissions();
-    if staged_perms.readonly() {
-        staged_perms.set_readonly(false);
-        fs::set_permissions(&staged_input, staged_perms)
+        .permissions()
+        .readonly()
+    {
+        make_writable(&staged_input)
             .with_context(|| format!("set staged input writable {}", staged_input.display()))?;
     }
     Ok(staged_input)
+}
+
+fn make_writable(path: &Path) -> Result<()> {
+    let mut permissions = fs::metadata(path)
+        .with_context(|| format!("read permissions for {}", path.display()))?
+        .permissions();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mode = permissions.mode();
+        permissions.set_mode(mode | 0o200);
+    }
+
+    #[cfg(not(unix))]
+    {
+        #[allow(clippy::permissions_set_readonly_false)]
+        permissions.set_readonly(false);
+    }
+
+    fs::set_permissions(path, permissions)
+        .with_context(|| format!("set writable permissions for {}", path.display()))?;
+    Ok(())
 }
 
 fn run_go_exporter(input: &Path) -> Result<LegacyExport> {
@@ -561,9 +585,7 @@ mod tests {
             "staged db should be writable for exporter"
         );
 
-        let mut writable = fs::metadata(&input).expect("restat input").permissions();
-        writable.set_readonly(false);
-        fs::set_permissions(&input, writable).expect("restore input permissions");
+        make_writable(&input).expect("restore input permissions");
 
         fs::remove_file(input).ok();
         fs::remove_dir_all(workdir).ok();

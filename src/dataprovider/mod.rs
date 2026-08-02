@@ -42,6 +42,7 @@ pub fn get() -> Arc<dyn DataProvider> {
 
 /// The DataProvider trait abstracts over different storage backends.
 #[async_trait]
+#[allow(dead_code)]
 pub trait DataProvider: Send + Sync + 'static {
     fn name(&self) -> &str;
 
