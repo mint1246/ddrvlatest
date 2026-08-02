@@ -51,7 +51,7 @@ uuid = { version = "1", features = ["v4"] }
 redb = "2"
 
 # PostgreSQL
-sqlx = { version = "0.7", features = ["postgres", "runtime-tokio-native-tls", "uuid", "chrono", "macros"] }
+sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio-native-tls", "uuid", "chrono", "macros"] }
 
 # FTP server
 libunftp = "0.20"

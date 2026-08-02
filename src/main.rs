@@ -102,22 +102,26 @@ async fn main() -> anyhow::Result<()> {
     let http_driver = Arc::clone(&driver);
     let http_cfg = cfg.frontend.http.clone();
 
-    let ftp_task = tokio::spawn(async move {
-        if let Err(e) = ftp::serve(ftp_driver, &ftp_cfg).await {
-            error!("FTP server error: {}", e);
-        }
-    });
-
     let http_task = tokio::spawn(async move {
         if let Err(e) = http::serve(http_driver, http_cfg).await {
             error!("HTTP server error: {}", e);
         }
     });
 
-    tokio::select! {
-        _ = ftp_task => {},
-        _ = http_task => {},
-        _ = tokio::signal::ctrl_c() => {},
+    if ftp_cfg.addr.is_empty() {
+        http_task.await?;
+    } else {
+        let ftp_task = tokio::spawn(async move {
+            if let Err(e) = ftp::serve(ftp_driver, &ftp_cfg).await {
+                error!("FTP server error: {}", e);
+            }
+        });
+
+        tokio::select! {
+            _ = ftp_task => {},
+            _ = http_task => {},
+            _ = tokio::signal::ctrl_c() => {},
+        }
     }
     tracker_shutdown.cancel();
     tracker_task.abort();
