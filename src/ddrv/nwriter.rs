@@ -105,18 +105,8 @@ impl AsyncWrite for NWriter {
                 this.closed = true;
                 let mut nodes: Vec<Node> = match res {
                     Ok(Ok(n)) => n,
-                    Ok(Err(e)) => {
-                        return Poll::Ready(Err(io::Error::new(
-                            io::ErrorKind::Other,
-                            e.to_string(),
-                        )))
-                    }
-                    Err(e) => {
-                        return Poll::Ready(Err(io::Error::new(
-                            io::ErrorKind::Other,
-                            e.to_string(),
-                        )))
-                    }
+                    Ok(Err(e)) => return Poll::Ready(Err(io::Error::other(e.to_string()))),
+                    Err(e) => return Poll::Ready(Err(io::Error::other(e.to_string()))),
                 };
 
                 // Restore original write order (Start was set to the chunk sequence number).

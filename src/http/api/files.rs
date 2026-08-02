@@ -37,7 +37,7 @@ fn validate_name(name: &str) -> bool {
     let trimmed = name.trim();
     !trimmed.is_empty()
         && trimmed.len() <= 255
-        && !trimmed.contains(|c| matches!(c, '/' | '<' | '>' | '"' | '|' | '*' | '\\'))
+        && !trimmed.contains(['/', '<', '>', '"', '|', '*', '\\'])
         && !trimmed.chars().any(|c| c.is_control())
 }
 

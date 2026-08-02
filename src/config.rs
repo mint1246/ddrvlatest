@@ -13,7 +13,7 @@ pub struct Config {
     pub frontend: FrontendConfig,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct DdrvConfig {
     #[serde(default, deserialize_with = "deserialize_token_list")]
     pub token: Vec<String>,
@@ -127,18 +127,6 @@ frontend:
     }
 }
 
-impl Default for DdrvConfig {
-    fn default() -> Self {
-        DdrvConfig {
-            token: vec![],
-            token_type: 0,
-            channels: vec![],
-            chunk_size: 0,
-            nitro: false,
-        }
-    }
-}
-
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct BoltConfig {
     #[serde(default)]
@@ -199,6 +187,7 @@ pub struct FtpConfig {
     pub async_write: bool,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct HttpConfig {
     #[serde(default)]
