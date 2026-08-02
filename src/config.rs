@@ -370,7 +370,18 @@ fn validate_addr(name: &str, addr: &str, errors: &mut Vec<String>) {
         addr.into()
     };
     if normalized.parse::<SocketAddr>().is_err() {
-        errors.push(format!("{name} must be a valid socket address"));
+        let valid_hostname = normalized
+            .rsplit_once(':')
+            .map(|(host, port)| {
+                let host = host.trim_start_matches('[').trim_end_matches(']');
+                !host.trim().is_empty() && port.parse::<u16>().is_ok()
+            })
+            .unwrap_or(false);
+        if !valid_hostname {
+            errors.push(format!(
+                "{name} must be a valid socket address or hostname:port"
+            ));
+        }
     }
 }
 fn validate_credentials(
@@ -405,7 +416,7 @@ fn validate_redb_parent(path: &str, errors: &mut Vec<String>) {
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    let probe = parent.join(format!(".ddrv-write-check-{}", std::process::id()));
+    let probe = parent.join(format!(".ddrv-write-check-{}", uuid::Uuid::new_v4()));
     match std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
