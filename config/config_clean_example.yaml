@@ -19,9 +19,6 @@ frontend:
     async_write: false
   http:
     addr: ":2526"
-    https_addr: ":443"
-    https_crtpath:
-    https_keypath:
     username: username
     password_hash: "$argon2id$v=19$m=19456,t=2,p=1$<salt>$<hash>"
     jwt_secret_file: /run/secrets/ddrv_jwt
