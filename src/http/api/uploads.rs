@@ -321,7 +321,7 @@ pub async fn append(
     let mut writer = state
         .driver
         .new_writer(move |n| out.lock().unwrap().push(n));
-    if let Err(e) = writer.write_all(&body).await.and_then(|_| Ok(())) {
+    if let Err(e) = writer.write_all(&body).await.map(|_| ()) {
         return err(StatusCode::BAD_GATEWAY, e.to_string());
     }
     if let Err(e) = writer.shutdown().await {
@@ -364,7 +364,7 @@ pub async fn commit(
     let expected = if s.size == 0 {
         0
     } else {
-        (s.size + s.part_size - 1) / s.part_size
+        s.size.div_ceil(s.part_size)
     };
     let total: u64 = s.parts.values().map(|p| p.size).sum();
     if total != s.size || (0..expected).any(|i| !s.parts.contains_key(&(i as u32))) {
