@@ -42,6 +42,10 @@ pub fn err(status: StatusCode, msg: impl Into<String>) -> Response {
     (status, Json(body)).into_response()
 }
 
+pub fn limit_err(status: StatusCode, code: &str, message: &str, limit: u64) -> Response {
+    (status, Json(serde_json::json!({"message":message,"error":{"type":"limit_exceeded","code":code,"limit":limit}}))).into_response()
+}
+
 #[derive(Debug, Deserialize)]
 pub struct LoginRequest {
     pub username: String,
@@ -57,6 +61,17 @@ pub struct TokenResponse {
 pub struct AuthConfigResponse {
     pub login: bool,
     pub anonymous: bool,
+    pub upload: UploadCapabilities,
+}
+
+#[derive(Serialize)]
+pub struct UploadCapabilities {
+    pub resumable: bool,
+    pub max_session_size: u64,
+    pub user_quota: u64,
+    pub max_concurrent_transfers: usize,
+    pub requests_per_minute: u32,
+    pub max_part_size: usize,
 }
 
 #[derive(Serialize)]

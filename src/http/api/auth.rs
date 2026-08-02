@@ -9,7 +9,9 @@ use chrono::Utc;
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 
-use super::types::{err, ApiResponse, AuthConfigResponse, LoginRequest, TokenResponse};
+use super::types::{
+    err, ApiResponse, AuthConfigResponse, LoginRequest, TokenResponse, UploadCapabilities,
+};
 use crate::http::AppState;
 
 #[derive(Serialize)]
@@ -118,6 +120,14 @@ pub async fn auth_config_handler(State(state): State<AppState>) -> impl IntoResp
     ApiResponse::ok(AuthConfigResponse {
         login: has_creds,
         anonymous: cfg.guest_mode,
+        upload: UploadCapabilities {
+            resumable: true,
+            max_session_size: cfg.upload_session_size_limit,
+            user_quota: cfg.upload_user_quota,
+            max_concurrent_transfers: cfg.upload_concurrent_transfers,
+            requests_per_minute: cfg.upload_requests_per_minute,
+            max_part_size: cfg.upload_memory_limit,
+        },
     })
 }
 

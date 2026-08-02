@@ -132,6 +132,32 @@ pub struct HttpConfig {
     pub guest_mode: bool,
     #[serde(default)]
     pub async_write: bool,
+    #[serde(default = "default_upload_session_size")]
+    pub upload_session_size_limit: u64,
+    #[serde(default = "default_upload_user_quota")]
+    pub upload_user_quota: u64,
+    #[serde(default = "default_upload_concurrency")]
+    pub upload_concurrent_transfers: usize,
+    #[serde(default = "default_upload_rate")]
+    pub upload_requests_per_minute: u32,
+    #[serde(default = "default_upload_memory")]
+    pub upload_memory_limit: usize,
+}
+
+fn default_upload_session_size() -> u64 {
+    100 * 1024 * 1024 * 1024
+}
+fn default_upload_user_quota() -> u64 {
+    1024 * 1024 * 1024 * 1024
+}
+fn default_upload_concurrency() -> usize {
+    4
+}
+fn default_upload_rate() -> u32 {
+    240
+}
+fn default_upload_memory() -> usize {
+    25 * 1024 * 1024
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
@@ -207,6 +233,26 @@ pub fn load(config_path: Option<&str>) -> anyhow::Result<Config> {
     }
     if let Ok(v) = std::env::var("HTTP_ASYNC_WRITE") {
         builder = builder.set_override("frontend.http.async_write", v)?;
+    }
+    for (env, key) in [
+        (
+            "UPLOAD_SESSION_SIZE_LIMIT",
+            "frontend.http.upload_session_size_limit",
+        ),
+        ("UPLOAD_USER_QUOTA", "frontend.http.upload_user_quota"),
+        (
+            "UPLOAD_CONCURRENT_TRANSFERS",
+            "frontend.http.upload_concurrent_transfers",
+        ),
+        (
+            "UPLOAD_REQUESTS_PER_MINUTE",
+            "frontend.http.upload_requests_per_minute",
+        ),
+        ("UPLOAD_MEMORY_LIMIT", "frontend.http.upload_memory_limit"),
+    ] {
+        if let Ok(v) = std::env::var(env) {
+            builder = builder.set_override(key, v)?;
+        }
     }
     if let Ok(v) = std::env::var("HTTPS_ADDR") {
         builder = builder.set_override("frontend.http.https_addr", v)?;

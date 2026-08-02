@@ -999,6 +999,9 @@ body {
   width: 0%;
 }
 .progress-fill.failed { background: var(--md-sys-color-error); width: 100%; }
+.upload-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:8px; }
+.upload-actions button { border:0; background:transparent; color:var(--md-sys-color-primary); cursor:pointer; font-weight:600; padding:4px 6px; }
+.upload-actions .upload-cancel { color:var(--md-sys-color-error); }
 
 /* ── Snackbar ─────────────────────────────────────────────── */
 #snackbar {

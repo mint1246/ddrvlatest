@@ -17,6 +17,11 @@ frontend:
     username: username
     password: password
     async_write: false
+    upload_session_size_limit: 107374182400
+    upload_user_quota: 1099511627776
+    upload_concurrent_transfers: 4
+    upload_requests_per_minute: 240
+    upload_memory_limit: 26214400
   http:
     addr: ":2526"
     https_addr: ":443"

@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use sqlx::{Postgres, QueryBuilder, Row as _};
 use std::sync::Arc;
 
-use crate::dataprovider::{DataProvider, DataProviderError, File, Result};
+use crate::dataprovider::{DataProvider, DataProviderError, File, Result, UploadSession};
 use crate::ddrv::{Driver, Node};
 
 // ── error mapping ─────────────────────────────────────────────────────────────
@@ -81,6 +81,8 @@ impl PgProvider {
         let pool = sqlx::PgPool::connect(&config.db_url)
             .await
             .expect("postgres connect failed");
+        sqlx::query("CREATE TABLE IF NOT EXISTS upload_sessions (id TEXT PRIMARY KEY, data BYTEA NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
+            .execute(&pool).await.expect("create upload_sessions table failed");
         PgProvider { pool, driver }
     }
 }
@@ -464,5 +466,36 @@ impl DataProvider for PgProvider {
     async fn close(&self) -> Result<()> {
         self.pool.close().await;
         Ok(())
+    }
+
+    async fn put_upload_session(&self, session: &UploadSession) -> Result<()> {
+        let data = bincode::serialize(session)?;
+        sqlx::query("INSERT INTO upload_sessions(id,data,updated_at) VALUES($1,$2,NOW()) ON CONFLICT(id) DO UPDATE SET data=EXCLUDED.data,updated_at=NOW()")
+            .bind(&session.id).bind(data).execute(&self.pool).await.map_err(map_sqlx_err)?;
+        Ok(())
+    }
+    async fn get_upload_session(&self, id: &str) -> Result<UploadSession> {
+        let data: Vec<u8> = sqlx::query_scalar("SELECT data FROM upload_sessions WHERE id=$1")
+            .bind(id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(map_sqlx_err)?;
+        Ok(bincode::deserialize(&data)?)
+    }
+    async fn delete_upload_session(&self, id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM upload_sessions WHERE id=$1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx_err)?;
+        Ok(())
+    }
+    async fn storage_usage(&self) -> Result<u64> {
+        let total: i64 =
+            sqlx::query_scalar("SELECT COALESCE(SUM(size),0)::BIGINT FROM fs WHERE NOT dir")
+                .fetch_one(&self.pool)
+                .await
+                .map_err(map_sqlx_err)?;
+        Ok(total.max(0) as u64)
     }
 }

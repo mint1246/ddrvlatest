@@ -6,13 +6,14 @@ use chrono::{DateTime, Utc};
 use redb::{Database, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 
-use crate::dataprovider::{DataProvider, DataProviderError, File, Result};
+use crate::dataprovider::{DataProvider, DataProviderError, File, Result, UploadSession};
 use crate::ddrv::{Driver, Node};
 
 // ── table definitions ────────────────────────────────────────────────────────
 
 const FS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("fs");
 const NODES_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("nodes");
+const UPLOADS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("upload_sessions");
 const ROOT: &str = "/";
 
 // ── serialisation types ──────────────────────────────────────────────────────
@@ -146,6 +147,7 @@ impl BoltDbProvider {
         let write_txn = db.begin_write()?;
         {
             write_txn.open_table(NODES_TABLE)?;
+            write_txn.open_table(UPLOADS_TABLE)?;
             let mut fs_table = write_txn.open_table(FS_TABLE)?;
             if fs_table.get(ROOT)?.is_none() {
                 let root = StoredFile {
@@ -825,6 +827,75 @@ impl DataProvider for BoltDbProvider {
     async fn close(&self) -> Result<()> {
         // redb flushes on every commit; nothing extra needed here.
         Ok(())
+    }
+
+    async fn put_upload_session(&self, session: &UploadSession) -> Result<()> {
+        let db = Arc::clone(&self.db);
+        let session = session.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let db = db.write().unwrap();
+            let tx = db.begin_write()?;
+            {
+                let mut table = tx.open_table(UPLOADS_TABLE)?;
+                let bytes = bincode::serialize(&session)?;
+                table.insert(session.id.as_str(), bytes.as_slice())?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| DataProviderError::Other(e.to_string()))?
+    }
+
+    async fn get_upload_session(&self, id: &str) -> Result<UploadSession> {
+        let db = Arc::clone(&self.db);
+        let id = id.to_owned();
+        tokio::task::spawn_blocking(move || -> Result<UploadSession> {
+            let db = db.read().unwrap();
+            let tx = db.begin_read()?;
+            let table = tx.open_table(UPLOADS_TABLE)?;
+            let value = table.get(id.as_str())?.ok_or(DataProviderError::NotFound)?;
+            Ok(bincode::deserialize(value.value())?)
+        })
+        .await
+        .map_err(|e| DataProviderError::Other(e.to_string()))?
+    }
+
+    async fn delete_upload_session(&self, id: &str) -> Result<()> {
+        let db = Arc::clone(&self.db);
+        let id = id.to_owned();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let db = db.write().unwrap();
+            let tx = db.begin_write()?;
+            {
+                let mut table = tx.open_table(UPLOADS_TABLE)?;
+                table.remove(id.as_str())?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| DataProviderError::Other(e.to_string()))?
+    }
+
+    async fn storage_usage(&self) -> Result<u64> {
+        let db = Arc::clone(&self.db);
+        tokio::task::spawn_blocking(move || -> Result<u64> {
+            let db = db.read().unwrap();
+            let tx = db.begin_read()?;
+            let table = tx.open_table(FS_TABLE)?;
+            let mut total = 0u64;
+            for item in table.iter()? {
+                let (_, value) = item?;
+                let file: StoredFile = bincode::deserialize(value.value())?;
+                if !file.dir {
+                    total = total.saturating_add(file.size.max(0) as u64);
+                }
+            }
+            Ok(total)
+        })
+        .await
+        .map_err(|e| DataProviderError::Other(e.to_string()))?
     }
 }
 
