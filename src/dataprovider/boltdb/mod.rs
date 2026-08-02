@@ -260,20 +260,104 @@ impl DataProvider for BoltDbProvider {
         .map_err(|e| DataProviderError::Other(e.to_string()))?
     }
 
-    async fn update(&self, id: &str, _parent: Option<&str>, file: &File) -> Result<File> {
+    async fn update(&self, id: &str, parent: Option<&str>, file: &File) -> Result<File> {
         let old_path = decode_path(id)?;
-        // Derive new path from new parent + new name
-        let new_path = if let Some(ref pid) = file.parent {
-            let pp = decode_path(pid)?;
-            clean_path(&format!("{}/{}", pp, file.name))
-        } else {
-            clean_path(&format!("{}/{}", parent_of(&old_path), file.name))
-        };
+        let expected_parent = parent.map(decode_path).transpose()?;
+        let destination_parent = file
+            .parent
+            .as_deref()
+            .map(decode_path)
+            .transpose()?
+            .unwrap_or_else(|| parent_of(&old_path).to_owned());
+        let new_path = clean_path(&format!("{}/{}", destination_parent, file.name));
+        let db = Arc::clone(&self.db);
 
-        if old_path != new_path {
-            self.mv(&old_path, &new_path).await?;
-        }
-        self.stat(&new_path).await
+        tokio::task::spawn_blocking(move || -> Result<File> {
+            let db = db.write().unwrap();
+            let write_txn = db.begin_write()?;
+            let result = {
+                let mut fs_table = write_txn.open_table(FS_TABLE)?;
+                let mut nodes_table = write_txn.open_table(NODES_TABLE)?;
+
+                let source = get_stored_file(&fs_table, &old_path)?;
+                if expected_parent
+                    .as_deref()
+                    .is_some_and(|p| p != parent_of(&old_path))
+                {
+                    return Err(DataProviderError::InvalidParent);
+                }
+                let destination =
+                    get_stored_file(&fs_table, &destination_parent).map_err(|e| match e {
+                        DataProviderError::NotFound => DataProviderError::InvalidParent,
+                        other => other,
+                    })?;
+                if !destination.dir
+                    || (source.dir
+                        && (destination_parent == old_path
+                            || destination_parent.starts_with(&format!("{old_path}/"))))
+                {
+                    return Err(DataProviderError::InvalidParent);
+                }
+
+                if old_path != new_path && fs_table.get(new_path.as_str())?.is_some() {
+                    return Err(DataProviderError::AlreadyExists);
+                }
+
+                let mut paths = vec![old_path.clone()];
+                paths.extend(collect_descendants(&fs_table, &old_path)?);
+                paths.sort();
+                paths.dedup();
+                let mut fs_moves = Vec::with_capacity(paths.len());
+                let mut node_moves = Vec::new();
+                for old in paths {
+                    let suffix = &old[old_path.len()..];
+                    let new = format!("{new_path}{suffix}");
+                    let raw = fs_table
+                        .get(old.as_str())?
+                        .ok_or(DataProviderError::NotFound)?
+                        .value()
+                        .to_vec();
+                    if old != new && fs_table.get(new.as_str())?.is_some() {
+                        return Err(DataProviderError::AlreadyExists);
+                    }
+                    for entry in nodes_table
+                        .range(node_range_start(&old).as_str()..node_range_end(&old).as_str())?
+                    {
+                        let (key, value) = entry?;
+                        let old_key = key.value().to_owned();
+                        node_moves.push((
+                            old_key.clone(),
+                            format!("{}{}", new, &old_key[old.len()..]),
+                            value.value().to_vec(),
+                        ));
+                    }
+                    fs_moves.push((old, new, raw));
+                }
+
+                for (old, _, _) in &fs_moves {
+                    fs_table.remove(old.as_str())?;
+                }
+                for (old, _, _) in &node_moves {
+                    nodes_table.remove(old.as_str())?;
+                }
+                for (_, new, raw) in &fs_moves {
+                    let mut stored: StoredFile = bincode::deserialize(raw)?;
+                    stored.name = new.rsplit('/').next().unwrap_or(new).to_owned();
+                    let raw = bincode::serialize(&stored)?;
+                    fs_table.insert(new.as_str(), raw.as_slice())?;
+                }
+                for (_, new, raw) in &node_moves {
+                    nodes_table.insert(new.as_str(), raw.as_slice())?;
+                }
+
+                let updated = get_stored_file(&fs_table, &new_path)?;
+                stored_to_file(&new_path, &updated)
+            };
+            write_txn.commit()?;
+            Ok(result)
+        })
+        .await
+        .map_err(|e| DataProviderError::Other(e.to_string()))?
     }
 
     async fn delete(&self, id: &str, parent: Option<&str>) -> Result<()> {
@@ -825,6 +909,95 @@ impl DataProvider for BoltDbProvider {
     async fn close(&self) -> Result<()> {
         // redb flushes on every commit; nothing extra needed here.
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod backend_contract_tests {
+    use super::*;
+    use crate::ddrv::{Config, TOKEN_BOT};
+
+    fn provider() -> (BoltDbProvider, std::path::PathBuf) {
+        let path = std::env::temp_dir().join(format!("ddrv-move-{}.redb", uuid::Uuid::new_v4()));
+        let driver = Arc::new(
+            Driver::new(Config {
+                tokens: vec!["test".into()],
+                token_type: TOKEN_BOT,
+                channels: vec!["test".into()],
+                chunk_size: 1024,
+                nitro: false,
+            })
+            .unwrap(),
+        );
+        (
+            BoltDbProvider::new(path.to_str().unwrap(), driver).unwrap(),
+            path,
+        )
+    }
+
+    #[tokio::test]
+    async fn update_move_contract() {
+        let (provider, path) = provider();
+        let source = provider.create("source", "root", true).await.unwrap();
+        let destination = provider.create("destination", "root", true).await.unwrap();
+        let item = provider.create("item", &source.id, false).await.unwrap();
+
+        let mut moved = item.clone();
+        moved.parent = Some(destination.id.clone());
+        let moved = provider
+            .update(&item.id, Some(&source.id), &moved)
+            .await
+            .unwrap();
+        assert_eq!(moved.parent.as_deref(), Some(destination.id.as_str()));
+
+        let missing_parent = base64::engine::general_purpose::STANDARD.encode("/missing");
+        let mut update = moved.clone();
+        update.parent = Some(missing_parent);
+        assert!(matches!(
+            provider
+                .update(&moved.id, Some(&destination.id), &update)
+                .await,
+            Err(DataProviderError::InvalidParent)
+        ));
+
+        provider
+            .create("collision", &source.id, false)
+            .await
+            .unwrap();
+        let collision = provider
+            .create("collision", &destination.id, false)
+            .await
+            .unwrap();
+        let mut update = collision.clone();
+        update.parent = Some(source.id.clone());
+        assert!(matches!(
+            provider
+                .update(&collision.id, Some(&destination.id), &update)
+                .await,
+            Err(DataProviderError::AlreadyExists)
+        ));
+
+        let mut update = moved.clone();
+        update.parent = Some(source.id.clone());
+        assert!(matches!(
+            provider.update(&moved.id, Some("root"), &update).await,
+            Err(DataProviderError::InvalidParent)
+        ));
+
+        let destination_file = provider
+            .create("not-a-directory", "root", false)
+            .await
+            .unwrap();
+        update.parent = Some(destination_file.id);
+        assert!(matches!(
+            provider
+                .update(&moved.id, Some(&destination.id), &update)
+                .await,
+            Err(DataProviderError::InvalidParent)
+        ));
+
+        provider.close().await.unwrap();
+        std::fs::remove_file(path).unwrap();
     }
 }
 

@@ -226,12 +226,14 @@ pub async fn update_file_handler(
         }
         file.name = name;
     }
-    let parent_override = body.parent.as_deref();
-    match dp.update(&id, Some(&dir_id), &file).await {
-        Ok(f) => {
-            let _ = parent_override; // parent update handled by dataprovider via file.parent
-            ApiResponse::ok(f).into_response()
+    if let Some(parent) = body.parent {
+        if parent.trim().is_empty() || parent.chars().any(char::is_control) {
+            return err(StatusCode::BAD_REQUEST, "invalid parent");
         }
+        file.parent = Some(parent);
+    }
+    match dp.update(&id, Some(&dir_id), &file).await {
+        Ok(f) => ApiResponse::ok(f).into_response(),
         Err(e) => dp_err(e),
     }
 }
