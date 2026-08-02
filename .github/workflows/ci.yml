@@ -179,9 +179,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: rustsec/audit-check@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Run Cargo security audit
+        run: |
           # No patched release exists for this transitive SQLx/MySQL advisory;
           # MySQL is disabled and the application only enables PostgreSQL.
-          ignore: RUSTSEC-2023-0071
+          cargo audit --ignore RUSTSEC-2023-0071
