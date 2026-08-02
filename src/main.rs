@@ -129,7 +129,8 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Keep Discord CDN URLs fresh in the background so download requests stay fast.
-    tracker::spawn_auto_renewal_task();
+    let tracker_shutdown = tokio_util::sync::CancellationToken::new();
+    let tracker_task = tracker::spawn_auto_renewal_task(tracker_shutdown.clone());
 
     // Spawn FTP + HTTP servers
     let ftp_driver = Arc::clone(&driver);
@@ -155,8 +156,12 @@ async fn main() -> anyhow::Result<()> {
         tokio::select! {
             _ = ftp_task => {},
             _ = http_task => {},
+            _ = tokio::signal::ctrl_c() => {},
         }
     }
+    tracker_shutdown.cancel();
+    tracker_task.abort();
+    let _ = tracker_task.await;
 
     Ok(())
 }
