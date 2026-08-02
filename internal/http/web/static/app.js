@@ -6,11 +6,11 @@
 /* ══════════════════════════════════════════════════════════
    State
 ═══════════════════════════════════════════════════════════ */
-function readTokenFromCookie() {
+function readCookie(name) {
   const entry = document.cookie
     .split(';')
     .map(s => s.trim())
-    .find(c => c.startsWith('ddrv_token='));
+    .find(c => c.startsWith(name + '='));
   if (!entry) return null;
   return decodeURIComponent(entry.split('=')[1] || '');
 }
@@ -27,7 +27,7 @@ function readSavedSortDesc() {
 const state = {
   config: { login: false, anonymous: true },
   authenticated: false,
-  token: localStorage.getItem('auth_token') || readTokenFromCookie() || null,
+  csrfToken: readCookie('ddrv_csrf'),
   directory: { id: 'root', name: '/', files: [], parent: null },
   breadcrumbs: [{ id: 'root', name: 'Home' }],
   selected: new Set(),   // ids
@@ -50,12 +50,13 @@ const state = {
 const api = {
   _headers() {
     const h = { 'Content-Type': 'application/json' };
-    if (state.token) h['Authorization'] = 'Bearer ' + state.token;
+    if (state.csrfToken) h['X-CSRF-Token'] = state.csrfToken;
     return h;
   },
 
   async _fetch(url, opts = {}) {
     const res = await fetch(url, {
+      credentials: 'same-origin',
       headers: this._headers(),
       ...opts,
     });
@@ -93,14 +94,14 @@ const api = {
       method: 'POST',
       body: JSON.stringify({ username, password }),
     });
-    const token = res?.data?.token;
-    if (!token) throw new Error('Invalid login response');
-    setAuthToken(token);
-    return token;
+    const csrfToken = res?.data?.csrf_token;
+    if (!csrfToken) throw new Error('Invalid login response');
+    state.csrfToken = csrfToken;
   },
 
-  logout() {
-    clearAuthToken();
+  async logout() {
+    await this._fetch('/api/user/logout', { method: 'POST' });
+    state.csrfToken = null;
   },
 
   async getDir(id) {
@@ -133,7 +134,7 @@ const api = {
 
   async deleteItem(id) {
     const headers = {};
-    if (state.token) headers['Authorization'] = 'Bearer ' + state.token;
+    if (state.csrfToken) headers['X-CSRF-Token'] = state.csrfToken;
     const res = await fetch('/api/directories/' + id, {
       method: 'DELETE',
       headers,
@@ -155,7 +156,7 @@ const api = {
 
   async overwriteFile(dirId, id, content, mime = 'text/plain;charset=utf-8') {
     const headers = {};
-    if (state.token) headers['Authorization'] = 'Bearer ' + state.token;
+    if (state.csrfToken) headers['X-CSRF-Token'] = state.csrfToken;
     if (mime) headers['Content-Type'] = mime;
     const res = await fetch('/api/directories/' + dirId + '/files/' + id + '/content', {
       method: 'PUT',
@@ -178,7 +179,8 @@ const api = {
 
       const xhr = new XMLHttpRequest();
       xhr.open('POST', '/api/directories/' + dirId + '/files');
-      if (state.token) xhr.setRequestHeader('Authorization', 'Bearer ' + state.token);
+      xhr.withCredentials = true;
+      if (state.csrfToken) xhr.setRequestHeader('X-CSRF-Token', state.csrfToken);
 
       xhr.upload.onprogress = e => {
         if (e.lengthComputable) onProgress(Math.round(e.loaded / e.total * 100));
@@ -202,19 +204,8 @@ const api = {
 /* ══════════════════════════════════════════════════════════
    Helpers
 ═══════════════════════════════════════════════════════════ */
-function setAuthToken(token) {
-  state.token = token;
-  localStorage.setItem('auth_token', token);
-  const secure = location.protocol === 'https:' ? 'Secure; ' : '';
-  // Cookie format: name=value; attributes (Secure must come before SameSite)
-  document.cookie = `ddrv_token=${encodeURIComponent(token)}; Max-Age=${60 * 60 * 24 * 30}; Path=/; ${secure}SameSite=Lax`;
-}
-
 function clearAuthToken() {
-  state.token = null;
-  localStorage.removeItem('auth_token');
-  const secure = location.protocol === 'https:' ? 'Secure; ' : '';
-  document.cookie = `ddrv_token=; Max-Age=0; Path=/; ${secure}SameSite=Lax`;
+  state.csrfToken = null;
 }
 
 function humanReadableSize(bytes, si = false, dp = 1) {
@@ -1341,7 +1332,7 @@ function buildCommandItems() {
         shortcut: 'L',
         keywords: 'account auth',
         run: async () => {
-          api.logout();
+          await api.logout();
           state.authenticated = false;
           updateAccountUI();
           showSnack('Signed out');
@@ -1463,16 +1454,9 @@ async function initApp() {
     state.config = { login: false, anonymous: true };
   }
 
-  // Rehydrate token from cookie/localStorage and persist both so they stay in sync.
-  if (state.token) {
-    setAuthToken(state.token);
-  } else {
-    const cookieToken = readTokenFromCookie();
-    if (cookieToken) setAuthToken(cookieToken);
-  }
-
-  // Check token
-  if (state.token) {
+  // The access token is HttpOnly; probe the server to discover cookie validity.
+  state.csrfToken = readCookie('ddrv_csrf');
+  if (state.config.login) {
     try {
       await api.checkToken();
       state.authenticated = true;
@@ -1483,7 +1467,7 @@ async function initApp() {
         openDialog('login-dialog');
       }
     }
-  } else if (state.config.login && !state.config.anonymous) {
+  } else if (!state.config.anonymous) {
     setAuthRequired(true);
     openDialog('login-dialog');
   }
@@ -1664,7 +1648,7 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   document.getElementById('account-logout-item')?.addEventListener('click', async () => {
     closeDialog('account-menu');
-    api.logout();
+    await api.logout();
     state.authenticated = false;
     state.selected.clear();
     updateAccountUI();

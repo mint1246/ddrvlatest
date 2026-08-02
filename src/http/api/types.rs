@@ -50,7 +50,7 @@ pub struct LoginRequest {
 
 #[derive(Serialize)]
 pub struct TokenResponse {
-    pub token: String,
+    pub csrf_token: String,
 }
 
 #[derive(Serialize)]
