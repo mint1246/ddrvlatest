@@ -63,13 +63,13 @@ frontend:
     # Use with caution based on your system's memory capacity.
     # Env: FTP_ASYNC_WRITE
     async_write: false
+  http:
     # Resumable upload limits (bytes unless noted)
     upload_session_size_limit: 107374182400
     upload_user_quota: 1099511627776
     upload_concurrent_transfers: 4
     upload_requests_per_minute: 240
     upload_memory_limit: 26214400
-  http:
     # HTTP server address.
     # Format: ":port". Set to empty to disable the HTTP server.
     # The HTTP server provides file transfer and management capabilities via a web interface.
