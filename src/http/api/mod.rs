@@ -15,6 +15,7 @@ pub fn router(state: AppState) -> Router<AppState> {
     // Protected API routes (auth middleware applied below)
     let protected = Router::new()
         .route("/check_token", get(auth::check_token_handler))
+        .route("/user/logout", post(auth::logout_handler))
         // Directory routes
         .route("/directories/", post(dirs::create_dir_handler))
         .route("/directories/:id", get(dirs::get_dir_handler))

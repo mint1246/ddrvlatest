@@ -47,7 +47,7 @@ frontend:
     # The FTP server provides file transfer capabilities using the FTP protocol.
     # Env: FTP_ADDR
     addr: ":2525"
-    # If username and password both are blank, authentication will be disabled
+    # If username and password_hash are both blank, authentication is disabled.
     # FTP server username.
     # Env: FTP_USERNAME
     username: username
@@ -81,9 +81,16 @@ frontend:
     # HTTP server username.
     # Env: HTTP_USERNAME
     username: username
-    # HTTP server password.
-    # Env: HTTP_PASSWORD
-    password: password
+    # Argon2id PHC hash (generate with `argon2` or another trusted password tool).
+    # Env: HTTP_PASSWORD_HASH
+    password_hash: "$argon2id$v=19$m=19456,t=2,p=1$<salt>$<hash>"
+    # JWT signing material (at least 32 high-entropy bytes). A root-readable
+    # secret file is preferred; HTTP_JWT_SECRET is also supported.
+    # Env: HTTP_JWT_SECRET_FILE
+    jwt_secret_file: /run/secrets/ddrv_jwt
+    # Access tokens are deliberately short-lived (60 through 3600 seconds).
+    # Env: HTTP_ACCESS_TOKEN_TTL_SECONDS
+    access_token_ttl_seconds: 900
     # Enables or disables guest mode.
     # When enabled, users can access the HTTP interface in READONLY mode without authentication.
     # Env: HTTP_GUEST_MODE
