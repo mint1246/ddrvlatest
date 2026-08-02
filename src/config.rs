@@ -45,7 +45,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::Config;
+    use super::{Config, HttpConfig};
 
     #[test]
     fn token_accepts_single_string() {
@@ -67,6 +67,20 @@ ddrv:
 "#;
         let cfg: Config = serde_yaml::from_str(raw).expect("config should parse");
         assert_eq!(cfg.ddrv.token, vec!["token-a", "token-b"]);
+    }
+
+    #[test]
+    fn http_config_rejects_removed_tls_settings() {
+        let raw = r#"
+addr: ":2526"
+https_addr: ":443"
+https_crtpath: cert.pem
+https_keypath: key.pem
+"#;
+
+        let error = serde_yaml::from_str::<HttpConfig>(raw)
+            .expect_err("unsupported TLS settings should be rejected");
+        assert!(error.to_string().contains("unknown field `https_addr`"));
     }
 }
 
@@ -116,12 +130,10 @@ pub struct FtpConfig {
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
 pub struct HttpConfig {
     #[serde(default)]
     pub addr: String,
-    pub https_addr: Option<String>,
-    pub https_keypath: Option<String>,
-    pub https_crtpath: Option<String>,
     #[serde(default)]
     pub cdn_proxy_base: Option<String>,
     #[serde(default)]
@@ -208,6 +220,8 @@ pub fn load(config_path: Option<&str>) -> anyhow::Result<Config> {
     if let Ok(v) = std::env::var("HTTP_ASYNC_WRITE") {
         builder = builder.set_override("frontend.http.async_write", v)?;
     }
+    // Preserve the former environment-variable mappings solely so obsolete TLS
+    // configuration is rejected by HttpConfig instead of being silently ignored.
     if let Ok(v) = std::env::var("HTTPS_ADDR") {
         builder = builder.set_override("frontend.http.https_addr", v)?;
     }

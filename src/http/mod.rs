@@ -44,7 +44,6 @@ pub async fn serve(driver: Arc<crate::ddrv::Driver>, config: HttpConfig) -> anyh
         .layer(CorsLayer::permissive())
         .with_state(state);
 
-    info!("Starting HTTP server on {}", config.addr);
     let addr = config.addr.trim_start_matches(':');
     let bind = if config.addr.starts_with(':') {
         format!("0.0.0.0:{}", addr)
@@ -53,6 +52,7 @@ pub async fn serve(driver: Arc<crate::ddrv::Driver>, config: HttpConfig) -> anyh
     };
 
     let listener = tokio::net::TcpListener::bind(&bind).await?;
+    info!(endpoint = %listener.local_addr()?, "HTTP server listening");
     axum::serve(listener, app).await?;
     Ok(())
 }
