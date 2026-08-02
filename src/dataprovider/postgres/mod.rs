@@ -3,6 +3,7 @@ use chrono::{DateTime, Utc};
 use sqlx::{Postgres, QueryBuilder, Row as _};
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::dataprovider::{DataProvider, DataProviderError, File, Result};
 use crate::ddrv::{Driver, Node};
@@ -75,14 +76,21 @@ pub struct PgProvider {
 /// Configuration for the PostgreSQL data provider.
 pub struct PostgresConfig {
     pub db_url: String,
+    pub max_connections: u32,
+    pub connect_timeout_seconds: u64,
+    pub idle_timeout_seconds: u64,
 }
 
 impl PgProvider {
-    pub async fn new(config: &PostgresConfig, driver: Arc<Driver>) -> Self {
-        let pool = sqlx::PgPool::connect(&config.db_url)
+    pub async fn new(config: &PostgresConfig, driver: Arc<Driver>) -> Result<Self> {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(config.max_connections)
+            .acquire_timeout(Duration::from_secs(config.connect_timeout_seconds))
+            .idle_timeout(Duration::from_secs(config.idle_timeout_seconds))
+            .connect(&config.db_url)
             .await
-            .expect("postgres connect failed");
-        PgProvider { pool, driver }
+            .map_err(map_sqlx_err)?;
+        Ok(PgProvider { pool, driver })
     }
 }
 
