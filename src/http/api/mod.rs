@@ -28,6 +28,7 @@ pub fn router(state: AppState) -> Router<AppState> {
             "/upload-sessions/:id/parts/:index",
             put(uploads::append).layer(DefaultBodyLimit::max(state.config.upload_memory_limit)),
         )
+        .route("/user/logout", post(auth::logout_handler))
         // Directory routes
         .route("/directories/", post(dirs::create_dir_handler))
         .route("/directories/:id", get(dirs::get_dir_handler))

@@ -13,6 +13,13 @@ use crate::ddrv::types::Node;
 /// How far ahead of `ex` we refresh Discord URLs (seconds).
 pub const NODE_RENEWAL_HEADROOM_SECS: i64 = 10 * 60;
 
+/// A file selected by the provider's expiry index for background renewal.
+#[derive(Clone, Debug)]
+pub struct DueNodeGroup {
+    pub file_id: String,
+    pub min_expiry: i64,
+}
+
 /// True if any node is expired or close enough to expiry that we should refresh it now.
 pub fn nodes_need_refresh(nodes: &[Node]) -> bool {
     let now = Utc::now().timestamp();
@@ -42,6 +49,7 @@ pub fn get() -> Arc<dyn DataProvider> {
 
 /// The DataProvider trait abstracts over different storage backends.
 #[async_trait]
+#[allow(dead_code)]
 pub trait DataProvider: Send + Sync + 'static {
     fn name(&self) -> &str;
 
@@ -81,6 +89,15 @@ pub trait DataProvider: Send + Sync + 'static {
 
     /// Remove all nodes for a file (truncate)
     async fn truncate(&self, id: &str) -> Result<()>;
+
+    /// Return at most `limit` node groups whose earliest positive expiry is at
+    /// or before `expires_before`. Implementations must use their expiry index.
+    async fn due_node_groups(&self, expires_before: i64, limit: usize)
+        -> Result<Vec<DueNodeGroup>>;
+
+    /// Renew one due group. Returns false when another replica owns the group
+    /// or it stopped being due after it was selected.
+    async fn renew_node_group(&self, id: &str, expires_before: i64) -> Result<bool>;
 
     /// Stat a file/directory by path
     async fn stat(&self, path: &str) -> Result<File>;

@@ -6,7 +6,7 @@ mod http;
 mod migration;
 mod tracker;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{error, info};
@@ -34,6 +34,27 @@ struct Args {
     /// Overwrite migration output if it already exists
     #[arg(long, default_value_t = false)]
     migrate_force: bool,
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Configuration utilities
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ConfigCommand {
+    /// Validate and print the redacted effective configuration
+    Check {
+        /// Path to config file
+        #[arg(long)]
+        config: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -50,6 +71,12 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    let check_path = args.command.as_ref().map(|command| match command {
+        Command::Config {
+            command: ConfigCommand::Check { config },
+        } => config.as_deref(),
+    });
+
     // Setup logging
     let filter = if args.debug { "debug" } else { "info" };
     tracing_subscriber::fmt()
@@ -57,11 +84,16 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     // Load config
-    let cfg = config::load(if args.config.is_empty() {
-        None
-    } else {
-        Some(&args.config)
-    })?;
+    let requested_path = check_path
+        .flatten()
+        .or_else(|| (!args.config.is_empty()).then_some(args.config.as_str()));
+    let cfg = config::load(requested_path)?;
+    cfg.validate()?;
+
+    if check_path.is_some() {
+        println!("{}", serde_yaml::to_string(&cfg.redacted())?);
+        return Ok(());
+    }
 
     // Build driver
     let ddrv_cfg = ddrv::Config {
@@ -85,15 +117,20 @@ async fn main() -> anyhow::Result<()> {
         info!("Using PostgreSQL provider");
         let pg_cfg = dataprovider::postgres::PostgresConfig {
             db_url: pg_url.clone(),
+            max_connections: cfg.dataprovider.postgres.max_connections,
+            connect_timeout_seconds: cfg.dataprovider.postgres.connect_timeout_seconds,
+            idle_timeout_seconds: cfg.dataprovider.postgres.idle_timeout_seconds,
         };
-        let provider = dataprovider::postgres::PgProvider::new(&pg_cfg, Arc::clone(&driver)).await;
+        let provider =
+            dataprovider::postgres::PgProvider::new(&pg_cfg, Arc::clone(&driver)).await?;
         dataprovider::load(Arc::new(provider));
     } else {
         anyhow::bail!("No data provider configured. Set boltdb.db_path or postgres.db_url.");
     }
 
     // Keep Discord CDN URLs fresh in the background so download requests stay fast.
-    tracker::spawn_auto_renewal_task();
+    let tracker_shutdown = tokio_util::sync::CancellationToken::new();
+    let tracker_task = tracker::spawn_auto_renewal_task(tracker_shutdown.clone());
 
     // Spawn FTP + HTTP servers
     let ftp_driver = Arc::clone(&driver);
@@ -101,22 +138,30 @@ async fn main() -> anyhow::Result<()> {
     let http_driver = Arc::clone(&driver);
     let http_cfg = cfg.frontend.http.clone();
 
-    let ftp_task = tokio::spawn(async move {
-        if let Err(e) = ftp::serve(ftp_driver, &ftp_cfg).await {
-            error!("FTP server error: {}", e);
-        }
-    });
-
     let http_task = tokio::spawn(async move {
         if let Err(e) = http::serve(http_driver, http_cfg).await {
             error!("HTTP server error: {}", e);
         }
     });
 
-    tokio::select! {
-        _ = ftp_task => {},
-        _ = http_task => {},
+    if ftp_cfg.addr.is_empty() {
+        http_task.await?;
+    } else {
+        let ftp_task = tokio::spawn(async move {
+            if let Err(e) = ftp::serve(ftp_driver, &ftp_cfg).await {
+                error!("FTP server error: {}", e);
+            }
+        });
+
+        tokio::select! {
+            _ = ftp_task => {},
+            _ = http_task => {},
+            _ = tokio::signal::ctrl_c() => {},
+        }
     }
+    tracker_shutdown.cancel();
+    tracker_task.abort();
+    let _ = tracker_task.await;
 
     Ok(())
 }

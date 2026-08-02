@@ -162,7 +162,7 @@ fn flatten_join(
 ) -> io::Result<Node> {
     match res {
         Ok(Ok(node)) => Ok(node),
-        Ok(Err(e)) => Err(io::Error::new(io::ErrorKind::Other, e.to_string())),
-        Err(e) => Err(io::Error::new(io::ErrorKind::Other, e.to_string())),
+        Ok(Err(e)) => Err(io::Error::other(e.to_string())),
+        Err(e) => Err(io::Error::other(e.to_string())),
     }
 }
