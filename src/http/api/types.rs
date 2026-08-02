@@ -46,6 +46,56 @@ pub fn limit_err(status: StatusCode, code: &str, message: &str, limit: u64) -> R
     (status, Json(serde_json::json!({"message":message,"error":{"type":"limit_exceeded","code":code,"limit":limit}}))).into_response()
 }
 
+/// Validate a single user-visible file or directory name before it is used as
+/// a path component.  Keep this shared by all HTTP write endpoints so uploads
+/// cannot create names that the regular file APIs would reject.
+pub(crate) fn valid_name(name: &str) -> bool {
+    let trimmed = name.trim();
+    if trimmed != name
+        || trimmed.is_empty()
+        || trimmed.len() > 255
+        || trimmed == "."
+        || trimmed == ".."
+        || trimmed.ends_with(['.', ' '])
+        || trimmed
+            .chars()
+            .any(|c| c.is_control() || ['/', '\\', '<', '>', '"', '|', '*', '?', ':'].contains(&c))
+    {
+        return false;
+    }
+
+    let device = trimmed
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    !matches!(
+        device.as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    )
+}
+
 #[derive(Debug, Deserialize)]
 pub struct LoginRequest {
     pub username: String,

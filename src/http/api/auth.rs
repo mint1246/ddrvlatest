@@ -25,6 +25,32 @@ struct Claims {
     exp: i64,
 }
 
+/// Identity attached to requests that passed authentication.  The HTTP
+/// configuration currently defines one account, but carrying the identity
+/// through request extensions keeps resource ownership explicit at handlers.
+#[derive(Debug, Clone)]
+pub struct AuthIdentity {
+    pub username: String,
+}
+
+fn configured_identity(cfg: &crate::config::HttpConfig) -> AuthIdentity {
+    AuthIdentity {
+        username: if cfg.username.is_empty() {
+            "anonymous".into()
+        } else {
+            cfg.username.clone()
+        },
+    }
+}
+
+fn attach_identity(
+    mut request: axum::extract::Request,
+    cfg: &crate::config::HttpConfig,
+) -> axum::extract::Request {
+    request.extensions_mut().insert(configured_identity(cfg));
+    request
+}
+
 fn signing_key(cfg: &crate::config::HttpConfig) -> String {
     format!("{}:{}", cfg.username, cfg.password)
 }
@@ -144,10 +170,11 @@ pub async fn auth_middleware(
 
     // No credentials configured: allow all.
     if cfg.username.is_empty() || cfg.password.is_empty() {
-        return next.run(request).await;
+        return next.run(attach_identity(request, cfg)).await;
     }
 
     let token = extract_token(request.headers());
+    let is_upload_route = request.uri().path().starts_with("/api/upload-sessions");
     let read_only = matches!(
         *request.method(),
         Method::GET | Method::HEAD | Method::OPTIONS
@@ -155,7 +182,7 @@ pub async fn auth_middleware(
 
     // Guest mode + read-only requests can proceed without auth token.
     // If a token is supplied, it must still be valid.
-    if cfg.guest_mode && read_only {
+    if cfg.guest_mode && read_only && !is_upload_route {
         match token {
             TokenCandidate::None => return next.run(request).await,
             TokenCandidate::Invalid => {
@@ -163,7 +190,7 @@ pub async fn auth_middleware(
             }
             TokenCandidate::Found(t) => {
                 if validate_token(cfg, &t) {
-                    return next.run(request).await;
+                    return next.run(attach_identity(request, cfg)).await;
                 }
                 return err(StatusCode::UNAUTHORIZED, "invalid token");
             }
@@ -172,7 +199,9 @@ pub async fn auth_middleware(
 
     // Non-guest or mutating requests require a valid token.
     match token {
-        TokenCandidate::Found(t) if validate_token(cfg, &t) => next.run(request).await,
+        TokenCandidate::Found(t) if validate_token(cfg, &t) => {
+            next.run(attach_identity(request, cfg)).await
+        }
         TokenCandidate::Found(_) => err(StatusCode::UNAUTHORIZED, "invalid token"),
         TokenCandidate::Invalid | TokenCandidate::None => {
             err(StatusCode::UNAUTHORIZED, "missing or invalid token")

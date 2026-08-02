@@ -1,6 +1,6 @@
 use axum::{
     body::Bytes,
-    extract::{Path, State},
+    extract::{Extension, Path, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
@@ -9,16 +9,16 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, HashMap, VecDeque},
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Mutex, OnceLock,
+        Arc, Mutex, OnceLock, Weak,
     },
     time::{Duration, Instant},
 };
 use tokio::io::AsyncWriteExt;
 
-use super::types::{err, limit_err, ApiResponse};
+use super::types::{err, limit_err, valid_name, ApiResponse};
 use crate::{
     dataprovider::{
         self,
@@ -26,12 +26,37 @@ use crate::{
         DataProviderError,
     },
     ddrv::types::Node,
-    http::AppState,
+    http::{api::auth::AuthIdentity, AppState},
 };
 
 static ACTIVE: AtomicUsize = AtomicUsize::new(0);
 static REQUESTS: OnceLock<Mutex<VecDeque<Instant>>> = OnceLock::new();
-static SESSION_WRITE: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+type SessionLock = tokio::sync::Mutex<()>;
+type LockRegistry = Mutex<HashMap<String, Weak<SessionLock>>>;
+static SESSION_LOCKS: OnceLock<LockRegistry> = OnceLock::new();
+static QUOTA_LOCKS: OnceLock<LockRegistry> = OnceLock::new();
+
+fn lock_for(registry: &OnceLock<LockRegistry>, key: &str) -> Arc<SessionLock> {
+    let mut locks = registry
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap();
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(key).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(SessionLock::new(()));
+    locks.insert(key.to_owned(), Arc::downgrade(&lock));
+    lock
+}
+
+fn session_lock(id: &str) -> Arc<SessionLock> {
+    lock_for(&SESSION_LOCKS, id)
+}
+
+fn quota_lock(owner: &str) -> Arc<SessionLock> {
+    lock_for(&QUOTA_LOCKS, owner)
+}
 
 #[derive(Deserialize)]
 pub struct CreateUpload {
@@ -116,18 +141,29 @@ fn rate_limit(state: &AppState) -> Option<Response> {
 fn dp_error(e: DataProviderError) -> Response {
     match e {
         DataProviderError::NotFound => err(StatusCode::NOT_FOUND, "upload session not found"),
+        DataProviderError::PermissionDenied => {
+            err(StatusCode::NOT_FOUND, "upload session not found")
+        }
         _ => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
-fn valid_name(name: &str) -> bool {
-    let trimmed = name.trim();
-    !trimmed.is_empty()
-        && trimmed.len() <= 255
-        && !trimmed.contains(|c| matches!(c, '/' | '<' | '>' | '"' | '|' | '*' | '\\'))
-        && !trimmed.chars().any(|c| c.is_control())
+
+async fn load_owned(id: &str, owner: &str) -> std::result::Result<UploadSession, Response> {
+    let session = dataprovider::get()
+        .get_upload_session(id)
+        .await
+        .map_err(dp_error)?;
+    if session.owner != owner {
+        return Err(err(StatusCode::NOT_FOUND, "upload session not found"));
+    }
+    Ok(session)
 }
 
-pub async fn create(State(state): State<AppState>, Json(body): Json<CreateUpload>) -> Response {
+pub async fn create(
+    State(state): State<AppState>,
+    Extension(identity): Extension<AuthIdentity>,
+    Json(body): Json<CreateUpload>,
+) -> Response {
     if let Some(r) = rate_limit(&state) {
         return r;
     }
@@ -143,7 +179,9 @@ pub async fn create(State(state): State<AppState>, Json(body): Json<CreateUpload
         );
     }
     let dp = dataprovider::get();
-    let usage = match dp.storage_usage().await {
+    let quota_lock = quota_lock(&identity.username);
+    let _quota_guard = quota_lock.lock().await;
+    let usage = match dp.upload_quota_usage(&identity.username).await {
         Ok(v) => v,
         Err(e) => return dp_error(e),
     };
@@ -165,7 +203,7 @@ pub async fn create(State(state): State<AppState>, Json(body): Json<CreateUpload
     let now = Utc::now();
     let session = UploadSession {
         id: uuid::Uuid::new_v4().to_string(),
-        owner: "default".into(),
+        owner: identity.username,
         parent: body.parent.unwrap_or_else(|| "root".into()),
         name: body.name,
         size: body.size,
@@ -182,14 +220,20 @@ pub async fn create(State(state): State<AppState>, Json(body): Json<CreateUpload
     }
 }
 
-pub async fn status(Path(id): Path<String>) -> Response {
-    match dataprovider::get().get_upload_session(&id).await {
+pub async fn status(
+    Extension(identity): Extension<AuthIdentity>,
+    Path(id): Path<String>,
+) -> Response {
+    match load_owned(&id, &identity.username).await {
         Ok(s) => ApiResponse::ok(UploadView::from(&s)).into_response(),
-        Err(e) => dp_error(e),
+        Err(response) => response,
     }
 }
-pub async fn resume(Path(id): Path<String>) -> Response {
-    status(Path(id)).await
+pub async fn resume(
+    Extension(identity): Extension<AuthIdentity>,
+    Path(id): Path<String>,
+) -> Response {
+    status(Extension(identity), Path(id)).await
 }
 
 struct ActiveGuard;
@@ -200,6 +244,7 @@ impl Drop for ActiveGuard {
 }
 pub async fn append(
     State(state): State<AppState>,
+    Extension(identity): Extension<AuthIdentity>,
     Path((id, index)): Path<(String, u32)>,
     headers: HeaderMap,
     body: Bytes,
@@ -238,16 +283,14 @@ pub async fn append(
             "x-part-sha256 does not match request body",
         );
     }
-    // Serialize the read/modify/write operation so parallel accepted parts cannot
-    // overwrite one another in either durable provider.
-    let _session_write = SESSION_WRITE
-        .get_or_init(|| tokio::sync::Mutex::new(()))
-        .lock()
-        .await;
+    // Serialize only this session's read/modify/write operation; uploads for
+    // unrelated sessions remain concurrent.
+    let session_lock = session_lock(&id);
+    let _session_write = session_lock.lock().await;
     let dp = dataprovider::get();
-    let mut s = match dp.get_upload_session(&id).await {
+    let mut s = match load_owned(&id, &identity.username).await {
         Ok(v) => v,
-        Err(e) => return dp_error(e),
+        Err(response) => return response,
     };
     if s.state != UploadState::Open {
         return err(StatusCode::CONFLICT, "upload session is not open");
@@ -301,11 +344,16 @@ pub async fn append(
     }
 }
 
-pub async fn commit(Path(id): Path<String>) -> Response {
+pub async fn commit(
+    Extension(identity): Extension<AuthIdentity>,
+    Path(id): Path<String>,
+) -> Response {
+    let session_lock = session_lock(&id);
+    let _session_write = session_lock.lock().await;
     let dp = dataprovider::get();
-    let mut s = match dp.get_upload_session(&id).await {
+    let mut s = match load_owned(&id, &identity.username).await {
         Ok(v) => v,
-        Err(e) => return dp_error(e),
+        Err(response) => return response,
     };
     if s.state == UploadState::Committed {
         return ApiResponse::ok(UploadView::from(&s)).into_response();
@@ -351,11 +399,16 @@ pub async fn commit(Path(id): Path<String>) -> Response {
     }
 }
 
-pub async fn cancel(Path(id): Path<String>) -> Response {
+pub async fn cancel(
+    Extension(identity): Extension<AuthIdentity>,
+    Path(id): Path<String>,
+) -> Response {
+    let session_lock = session_lock(&id);
+    let _session_write = session_lock.lock().await;
     let dp = dataprovider::get();
-    let mut s = match dp.get_upload_session(&id).await {
+    let mut s = match load_owned(&id, &identity.username).await {
         Ok(v) => v,
-        Err(e) => return dp_error(e),
+        Err(response) => return response,
     };
     if s.state == UploadState::Committed {
         return err(StatusCode::CONFLICT, "committed upload cannot be cancelled");

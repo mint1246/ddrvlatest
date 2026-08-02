@@ -15,7 +15,7 @@ use std::{
 use tokio_util::io::ReaderStream;
 use tracing::{info, warn};
 
-use super::types::{err, ApiResponse, UpdateFileRequest};
+use super::types::{err, valid_name, ApiResponse, UpdateFileRequest};
 use crate::{
     dataprovider,
     dataprovider::types::DataProviderError,
@@ -31,14 +31,6 @@ fn dp_err(e: DataProviderError) -> Response {
         DataProviderError::InvalidParent => err(StatusCode::BAD_REQUEST, e.to_string()),
         e => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
-}
-
-fn validate_name(name: &str) -> bool {
-    let trimmed = name.trim();
-    !trimmed.is_empty()
-        && trimmed.len() <= 255
-        && !trimmed.contains(|c| matches!(c, '/' | '<' | '>' | '"' | '|' | '*' | '\\'))
-        && !trimmed.chars().any(|c| c.is_control())
 }
 
 fn safe_content_disposition_name(name: &str) -> String {
@@ -108,7 +100,7 @@ pub async fn create_file_handler(
             Some(n) => n.to_string(),
             None => return err(StatusCode::BAD_REQUEST, "missing filename"),
         };
-        if !validate_name(&filename) {
+        if !valid_name(&filename) {
             return err(StatusCode::BAD_REQUEST, "invalid filename");
         }
 
@@ -221,7 +213,7 @@ pub async fn update_file_handler(
         Err(e) => return dp_err(e),
     };
     if let Some(name) = body.name {
-        if !validate_name(&name) {
+        if !valid_name(&name) {
             return err(StatusCode::BAD_REQUEST, "invalid filename");
         }
         file.name = name;

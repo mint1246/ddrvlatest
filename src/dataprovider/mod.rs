@@ -111,4 +111,7 @@ pub trait DataProvider: Send + Sync + 'static {
     async fn get_upload_session(&self, id: &str) -> Result<UploadSession>;
     async fn delete_upload_session(&self, id: &str) -> Result<()>;
     async fn storage_usage(&self) -> Result<u64>;
+    /// Return committed storage plus open resumable-upload reservations for an
+    /// owner.  Providers should keep the committed-storage lookup efficient.
+    async fn upload_quota_usage(&self, owner: &str) -> Result<u64>;
 }
