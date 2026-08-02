@@ -119,8 +119,12 @@ fn dp_error(e: DataProviderError) -> Response {
         _ => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
-fn valid_name(n: &str) -> bool {
-    !n.trim().is_empty() && n.len() <= 255 && !n.contains(['/', '\\'])
+fn valid_name(name: &str) -> bool {
+    let trimmed = name.trim();
+    !trimmed.is_empty()
+        && trimmed.len() <= 255
+        && !trimmed.contains(|c| matches!(c, '/' | '<' | '>' | '"' | '|' | '*' | '\\'))
+        && !trimmed.chars().any(|c| c.is_control())
 }
 
 pub async fn create(State(state): State<AppState>, Json(body): Json<CreateUpload>) -> Response {
