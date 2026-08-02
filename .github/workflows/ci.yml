@@ -1,0 +1,177 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  checks:
+    name: Rust checks and tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Cache Cargo checks
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-checks-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-checks-
+      - name: Check formatting
+        run: cargo fmt --check
+      - name: Run Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Run test suite
+        run: cargo test --all-features
+
+  postgres:
+    name: PostgreSQL provider contract and migrations
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ddrv
+          POSTGRES_PASSWORD: ddrv
+          POSTGRES_DB: ddrv_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ddrv -d ddrv_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://ddrv:ddrv@localhost:5432/ddrv_test
+      POSTGRES_DB_URL: postgres://ddrv:ddrv@localhost:5432/ddrv_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache Cargo checks
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-checks-postgres-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-checks-postgres-
+            ${{ runner.os }}-cargo-checks-
+      - name: Verify PostgreSQL service
+        run: pg_isready --dbname "$DATABASE_URL"
+      - name: Run PostgreSQL provider contract tests
+        run: cargo test --all-features dataprovider::postgres
+      - name: Run migration tests
+        run: cargo test --all-features migration::tests
+
+  redb:
+    name: redb persistence and reopen
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache Cargo checks
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-checks-redb-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-checks-redb-
+            ${{ runner.os }}-cargo-checks-
+      - name: Persist and reopen migrated redb data
+        run: cargo test --all-features migration::tests::writes_redb_records_in_expected_shape
+      - name: Reopen an empty migrated redb database
+        run: cargo test --all-features migration::tests::migrates_zero_length_legacy_db_without_exporter
+
+  javascript:
+    name: JavaScript syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Check Cloudflare worker
+        run: node --check cloudflare-worker/index.js
+      - name: Check web application
+        run: node --check internal/http/web/static/app.js
+
+  container-smoke:
+    name: Container startup smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache Cargo release build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-release-
+      - name: Build release binary
+        run: cargo build --release --all-features
+      - name: Build container
+        run: docker build --tag ddrv:ci .
+      - name: Start container with test configuration
+        run: |
+          cat > "$RUNNER_TEMP/ddrv-ci.yaml" <<'YAML'
+          ddrv:
+            token: local-smoke-test-token
+            token_type: 1
+            channels: ["local-smoke-test-channel"]
+          dataprovider:
+            boltdb:
+              db_path: /tmp/ddrv-ci.redb
+          frontend:
+            http:
+              addr: ":2526"
+              guest_mode: true
+          YAML
+          docker run --detach --rm --name ddrv-ci -p 127.0.0.1:2526:2526 \
+            -v "$RUNNER_TEMP/ddrv-ci.yaml:/app/config.yaml:ro" \
+            ddrv:ci --config /app/config.yaml
+      - name: Wait for HTTP startup
+        run: |
+          for attempt in {1..30}; do
+            if curl --fail --silent --show-error http://127.0.0.1:2526/ >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs ddrv-ci
+          exit 1
+      - name: Stop container
+        if: always()
+        run: docker rm --force ddrv-ci 2>/dev/null || true
+
+  audit:
+    name: Cargo security audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
