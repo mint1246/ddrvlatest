@@ -6,7 +6,7 @@ mod http;
 mod migration;
 mod tracker;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{error, info};
@@ -34,6 +34,27 @@ struct Args {
     /// Overwrite migration output if it already exists
     #[arg(long, default_value_t = false)]
     migrate_force: bool,
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Configuration utilities
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ConfigCommand {
+    /// Validate and print the redacted effective configuration
+    Check {
+        /// Path to config file
+        #[arg(long)]
+        config: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -50,6 +71,13 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    let check_path = match &args.command {
+        Some(Command::Config {
+            command: ConfigCommand::Check { config },
+        }) => Some(config.as_deref()),
+        None => None,
+    };
+
     // Setup logging
     let filter = if args.debug { "debug" } else { "info" };
     tracing_subscriber::fmt()
@@ -57,11 +85,20 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     // Load config
-    let cfg = config::load(if args.config.is_empty() {
+    let requested_path = check_path
+        .flatten()
+        .or_else(|| (!args.config.is_empty()).then_some(args.config.as_str()));
+    let cfg = config::load(if requested_path.is_none() {
         None
     } else {
-        Some(&args.config)
+        requested_path
     })?;
+    cfg.validate()?;
+
+    if check_path.is_some() {
+        println!("{}", serde_yaml::to_string(&cfg.redacted())?);
+        return Ok(());
+    }
 
     // Build driver
     let ddrv_cfg = ddrv::Config {
@@ -85,8 +122,12 @@ async fn main() -> anyhow::Result<()> {
         info!("Using PostgreSQL provider");
         let pg_cfg = dataprovider::postgres::PostgresConfig {
             db_url: pg_url.clone(),
+            max_connections: cfg.dataprovider.postgres.max_connections,
+            connect_timeout_seconds: cfg.dataprovider.postgres.connect_timeout_seconds,
+            idle_timeout_seconds: cfg.dataprovider.postgres.idle_timeout_seconds,
         };
-        let provider = dataprovider::postgres::PgProvider::new(&pg_cfg, Arc::clone(&driver)).await;
+        let provider =
+            dataprovider::postgres::PgProvider::new(&pg_cfg, Arc::clone(&driver)).await?;
         dataprovider::load(Arc::new(provider));
     } else {
         anyhow::bail!("No data provider configured. Set boltdb.db_path or postgres.db_url.");

@@ -36,7 +36,12 @@ dataprovider:
     # Use "?sslmode=disable" for local or unencrypted connections.
     # PostgreSQL is used for storing filesystem metadata in a more scalable and networked environment.
     # Env: POSTGRES_DB_URL
-    db_url: postgres://user:password@localhost:port/database?sslmode=disable
+    # Leave empty while boltdb is enabled; configure exactly one backend.
+    db_url: ""
+    # Connection pool limits and timeouts (seconds).
+    max_connections: 10
+    connect_timeout_seconds: 10
+    idle_timeout_seconds: 600
 
 # Frontend Configuration
 # This section defines the settings for the user interfaces that allow access to ddrv storage.
@@ -80,7 +85,7 @@ frontend:
     # This is typically set to port 443 for HTTPS.
     # Note: HTTPS server will only start if `https_addr`, `https_keypath`, and `https_crtpath` are all provided.
     # Env: HTTPS_ADDR
-    https_addr: ":443"
+    # https_addr: ":443"
     # Path to the HTTPS certificate file.
     # This certificate is used in SSL/TLS for HTTPS to verify the server's identity.
     # Env: HTTPS_CRTPATH
