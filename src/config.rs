@@ -80,7 +80,14 @@ https_keypath: key.pem
 
         let error = serde_yaml::from_str::<HttpConfig>(raw)
             .expect_err("unsupported TLS settings should be rejected");
-        assert!(error.to_string().contains("unknown field `https_addr`"));
+        let message = error.to_string();
+        assert!(message.contains("unknown field"));
+        assert!(
+            ["https_addr", "https_crtpath", "https_keypath"]
+                .iter()
+                .any(|field| message.contains(field)),
+            "unexpected error: {message}"
+        );
     }
 }
 

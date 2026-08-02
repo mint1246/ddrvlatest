@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use axum::{routing::get, Router};
 use tower_http::cors::CorsLayer;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::config::HttpConfig;
 
@@ -52,7 +52,12 @@ pub async fn serve(driver: Arc<crate::ddrv::Driver>, config: HttpConfig) -> anyh
     };
 
     let listener = tokio::net::TcpListener::bind(&bind).await?;
-    info!(endpoint = %listener.local_addr()?, "HTTP server listening");
+    match listener.local_addr() {
+        Ok(endpoint) => info!(%endpoint, "HTTP server listening"),
+        Err(error) => {
+            warn!(%error, bind = %bind, "HTTP server listening (bound address unavailable)")
+        }
+    }
     axum::serve(listener, app).await?;
     Ok(())
 }
