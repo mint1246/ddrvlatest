@@ -51,7 +51,7 @@ pub fn router(state: AppState) -> Router<AppState> {
             "/directories/:dir_id/files/:id/content",
             put(files::overwrite_file_handler),
         )
-        .layer(DefaultBodyLimit::max(state.config.upload_memory_limit))
+.layer(DefaultBodyLimit::disable())
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::auth_middleware,
