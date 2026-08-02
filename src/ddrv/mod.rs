@@ -118,7 +118,7 @@ impl Driver {
         let rest = Arc::clone(&self.rest);
         // Increase concurrency to leverage multiple tokens - this will automatically
         // rotate through all available tokens, spreading the rate limit load.
-        let concurrency = (expired.len().min(16)).max(8);
+        let concurrency = expired.len().clamp(8, 16);
         let mut fetches = stream::iter(expired.into_iter().map(move |(mid, channel_id)| {
             let rest = Arc::clone(&rest);
             async move {
@@ -158,7 +158,7 @@ impl Driver {
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 fn parse_chunk_size(chunk_size: usize, token_type: i32) -> Result<usize> {
-    if token_type > TOKEN_USER_NITRO_BASIC || token_type < 0 {
+    if !(0..=TOKEN_USER_NITRO_BASIC).contains(&token_type) {
         return Err(DdrvError::Other(format!(
             "invalid token type {}",
             token_type
