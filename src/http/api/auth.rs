@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -30,7 +30,7 @@ const LOGIN_WINDOW: Duration = Duration::from_secs(60);
 
 #[derive(Default)]
 pub struct AuthState {
-    revoked: Mutex<HashSet<String>>,
+    revoked: Mutex<HashMap<String, i64>>,
     login_attempts: Mutex<HashMap<String, Vec<Instant>>>,
 }
 
@@ -122,13 +122,13 @@ fn validate_token(
         &validation(),
     )
     .map_err(|_| ())?;
-    if data.claims.sub != cfg.username
-        || auth
-            .revoked
-            .lock()
-            .map_err(|_| ())?
-            .contains(&data.claims.jti)
-    {
+    if data.claims.sub != cfg.username {
+        return Err(());
+    }
+    let now = Utc::now().timestamp();
+    let mut revoked = auth.revoked.lock().map_err(|_| ())?;
+    revoked.retain(|_, exp| *exp > now);
+    if revoked.contains_key(&data.claims.jti) {
         return Err(());
     }
     Ok(data.claims)
@@ -257,7 +257,7 @@ pub async fn logout_handler(State(state): State<AppState>, request: Request) -> 
                 .revoked
                 .lock()
                 .expect("revocation store poisoned")
-                .insert(claims.jti);
+                .insert(claims.jti, claims.exp);
         }
     }
     let mut response = ApiResponse::ok(CheckTokenResponse { valid: false }).into_response();
@@ -294,6 +294,15 @@ fn csrf_valid(headers: &HeaderMap) -> bool {
     }
 }
 
+fn clear_token_cookie(response: &mut Response) {
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        HeaderValue::from_static(
+            "ddrv_token=; Max-Age=0; Path=/; HttpOnly; Secure; SameSite=Strict",
+        ),
+    );
+}
+
 pub async fn auth_middleware(
     State(state): State<AppState>,
     request: Request,
@@ -307,7 +316,8 @@ pub async fn auth_middleware(
         *request.method(),
         Method::GET | Method::HEAD | Method::OPTIONS
     );
-    if state.config.guest_mode && read_only && token == TokenCandidate::None {
+    let is_check_token = request.uri().path().ends_with("/check_token");
+    if state.config.guest_mode && read_only && token == TokenCandidate::None && !is_check_token {
         return next.run(request).await;
     }
     let valid = match &token {
@@ -317,10 +327,14 @@ pub async fn auth_middleware(
         _ => false,
     };
     if !valid {
-        return err(
+        let mut response = err(
             StatusCode::UNAUTHORIZED,
             "missing, invalid, or revoked token",
         );
+        if matches!(token, TokenCandidate::Cookie(_)) {
+            clear_token_cookie(&mut response);
+        }
+        return response;
     }
     if !read_only && matches!(token, TokenCandidate::Cookie(_)) && !csrf_valid(request.headers()) {
         return err(StatusCode::FORBIDDEN, "missing or invalid CSRF token");
@@ -400,7 +414,7 @@ mod tests {
         let c = claims();
         let token = encode_claims(&c, cfg.jwt_secret.as_bytes(), Algorithm::HS256);
         let auth = AuthState::default();
-        auth.revoked.lock().unwrap().insert(c.jti);
+        auth.revoked.lock().unwrap().insert(c.jti, c.exp);
         assert!(validate_token(&cfg, &auth, &token).is_err());
     }
     #[test]
