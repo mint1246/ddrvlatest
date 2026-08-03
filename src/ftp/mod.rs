@@ -4,8 +4,10 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use libunftp::auth::{AuthenticationError, Authenticator, Credentials, DefaultUser};
-use libunftp::storage::{Error, ErrorKind, Fileinfo, Metadata, Result, StorageBackend};
-use tokio::io::AsyncReadExt;
+use libunftp::storage::{
+    Error, ErrorKind, Fileinfo, Metadata, Result, StorageBackend, FEATURE_RESTART,
+};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use tracing::{debug, error, info};
 
 use crate::dataprovider::types::DataProviderError;
@@ -80,9 +82,23 @@ impl DdrvStorage {
     }
 }
 
+async fn copy_to_writer<W, R>(writer: &mut W, reader: &mut R) -> Result<u64>
+where
+    W: AsyncWrite + Unpin,
+    R: AsyncRead + Unpin,
+{
+    tokio::io::copy(reader, writer)
+        .await
+        .map_err(|e| Error::new(ErrorKind::LocalError, e))
+}
+
 #[async_trait]
 impl StorageBackend<DefaultUser> for DdrvStorage {
     type Metadata = DdrvMetadata;
+
+    fn supported_features(&self) -> u32 {
+        FEATURE_RESTART
+    }
 
     async fn metadata<P: AsRef<Path> + Send + Debug>(
         &self,
@@ -151,7 +167,7 @@ impl StorageBackend<DefaultUser> for DdrvStorage {
         _user: &DefaultUser,
         mut input: R,
         path: P,
-        _start_pos: u64,
+        start_pos: u64,
     ) -> Result<u64> {
         let dp = crate::dataprovider::get();
         let path_s = Self::path_str(path);
@@ -166,6 +182,36 @@ impl StorageBackend<DefaultUser> for DdrvStorage {
             error!(path = %path_s, error = %e, "FTP upload stat failed");
             dp_err(e)
         })?;
+
+        let file_size = u64::try_from(file.size).map_err(|_| {
+            Error::new(
+                ErrorKind::LocalError,
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "negative FTP file size"),
+            )
+        })?;
+        if start_pos > file_size {
+            return Err(Error::new(
+                ErrorKind::LocalError,
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "FTP REST offset is beyond the end of the file",
+                ),
+            ));
+        }
+
+        // REST + STOR rewrites the file from the requested byte offset. Rebuild
+        // the prefix through the same writer before consuming the new suffix.
+        let resume_nodes = if start_pos > 0 {
+            let mut nodes = dp.get_nodes(&file.id).await.map_err(dp_err)?;
+            self.driver
+                .update_nodes(&mut nodes)
+                .await
+                .map_err(|e| Error::new(ErrorKind::LocalError, e))?;
+            Some(nodes)
+        } else {
+            None
+        };
+
         dp.truncate(&file.id).await.map_err(|e| {
             error!(path = %path_s, file_id = %file.id, error = %e, "FTP upload truncate failed");
             dp_err(e)
@@ -173,33 +219,30 @@ impl StorageBackend<DefaultUser> for DdrvStorage {
         debug!(path = %path_s, file_id = %file.id, "FTP upload file prepared");
 
         let nodes = Arc::new(Mutex::new(Vec::<crate::ddrv::types::Node>::new()));
-        let mut total: u64 = 0;
+        let total: u64;
 
         if self.async_write {
             let nodes_cb = Arc::clone(&nodes);
             let mut writer = self.driver.new_nwriter(move |node| {
                 nodes_cb.lock().expect("nodes mutex poisoned").push(node);
             });
-            let mut buf = vec![0u8; 256 * 1024];
-            loop {
-                let n = input
-                    .read(&mut buf)
+            if let Some(nodes) = resume_nodes {
+                let prefix = self
+                    .driver
+                    .new_reader(nodes, 0)
+                    .map_err(|e| Error::new(ErrorKind::LocalError, e))?;
+                let mut prefix = prefix.take(start_pos);
+                copy_to_writer(&mut writer, &mut prefix)
                     .await
                     .map_err(|e| {
-                        error!(path = %path_s, bytes_written = total, error = %e, "FTP upload read failed");
-                        Error::new(ErrorKind::LocalError, e)
+                        error!(path = %path_s, error = %e, "FTP REST prefix write failed");
+                        e
                     })?;
-                if n == 0 {
-                    break;
-                }
-                tokio::io::AsyncWriteExt::write_all(&mut writer, &buf[..n])
-                    .await
-                    .map_err(|e| {
-                        error!(path = %path_s, bytes_written = total, chunk_size = n, error = %e, "FTP upload write failed");
-                        Error::new(ErrorKind::LocalError, e)
-                    })?;
-                total += n as u64;
             }
+            total = copy_to_writer(&mut writer, &mut input).await.map_err(|e| {
+                error!(path = %path_s, error = %e, "FTP upload write failed");
+                e
+            })?;
             tokio::io::AsyncWriteExt::shutdown(&mut writer)
                 .await
                 .map_err(|e| {
@@ -211,26 +254,23 @@ impl StorageBackend<DefaultUser> for DdrvStorage {
             let mut writer = self.driver.new_writer(move |node| {
                 nodes_cb.lock().expect("nodes mutex poisoned").push(node);
             });
-            let mut buf = vec![0u8; 256 * 1024];
-            loop {
-                let n = input
-                    .read(&mut buf)
+            if let Some(nodes) = resume_nodes {
+                let prefix = self
+                    .driver
+                    .new_reader(nodes, 0)
+                    .map_err(|e| Error::new(ErrorKind::LocalError, e))?;
+                let mut prefix = prefix.take(start_pos);
+                copy_to_writer(&mut writer, &mut prefix)
                     .await
                     .map_err(|e| {
-                        error!(path = %path_s, bytes_written = total, error = %e, "FTP upload read failed");
-                        Error::new(ErrorKind::LocalError, e)
+                        error!(path = %path_s, error = %e, "FTP REST prefix write failed");
+                        e
                     })?;
-                if n == 0 {
-                    break;
-                }
-                tokio::io::AsyncWriteExt::write_all(&mut writer, &buf[..n])
-                    .await
-                    .map_err(|e| {
-                        error!(path = %path_s, bytes_written = total, chunk_size = n, error = %e, "FTP upload write failed");
-                        Error::new(ErrorKind::LocalError, e)
-                    })?;
-                total += n as u64;
             }
+            total = copy_to_writer(&mut writer, &mut input).await.map_err(|e| {
+                error!(path = %path_s, error = %e, "FTP upload write failed");
+                e
+            })?;
             tokio::io::AsyncWriteExt::shutdown(&mut writer)
                 .await
                 .map_err(|e| {
