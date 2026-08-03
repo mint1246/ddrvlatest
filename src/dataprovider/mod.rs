@@ -6,7 +6,7 @@ pub mod boltdb;
 pub mod postgres;
 pub mod types;
 
-pub use types::{DataProviderError, File, Result};
+pub use types::{DataProviderError, File, Result, UploadSession};
 
 use crate::ddrv::types::Node;
 
@@ -122,4 +122,13 @@ pub trait DataProvider: Send + Sync + 'static {
 
     /// Close/cleanup the data provider
     async fn close(&self) -> Result<()>;
+
+    /// Durable resumable-upload metadata. Implementations must make each write atomic.
+    async fn put_upload_session(&self, session: &UploadSession) -> Result<()>;
+    async fn get_upload_session(&self, id: &str) -> Result<UploadSession>;
+    async fn delete_upload_session(&self, id: &str) -> Result<()>;
+    async fn storage_usage(&self) -> Result<u64>;
+    /// Return committed storage plus open resumable-upload reservations for an
+    /// owner.  Providers should keep the committed-storage lookup efficient.
+    async fn upload_quota_usage(&self, owner: &str) -> Result<u64>;
 }

@@ -6,7 +6,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::warn;
 
-use crate::dataprovider::{DataProvider, DataProviderError, DueNodeGroup, File, Result};
+use crate::dataprovider::{
+    DataProvider, DataProviderError, DueNodeGroup, File, Result, UploadSession,
+};
 use crate::ddrv::{Driver, Node};
 
 // ── error mapping ─────────────────────────────────────────────────────────────
@@ -91,6 +93,18 @@ impl PgProvider {
             .connect(&config.db_url)
             .await
             .map_err(map_sqlx_err)?;
+        sqlx::query("CREATE TABLE IF NOT EXISTS upload_sessions (id TEXT PRIMARY KEY, data BYTEA NOT NULL, owner TEXT NOT NULL DEFAULT '', state TEXT NOT NULL DEFAULT 'open', size BIGINT NOT NULL DEFAULT 0, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
+            .execute(&pool).await.map_err(map_sqlx_err)?;
+        for statement in [
+            "ALTER TABLE upload_sessions ADD COLUMN IF NOT EXISTS owner TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE upload_sessions ADD COLUMN IF NOT EXISTS state TEXT NOT NULL DEFAULT 'open'",
+            "ALTER TABLE upload_sessions ADD COLUMN IF NOT EXISTS size BIGINT NOT NULL DEFAULT 0",
+        ] {
+            sqlx::query(statement)
+                .execute(&pool)
+                .await
+                .map_err(map_sqlx_err)?;
+        }
         if let Err(error) =
             sqlx::query("CREATE INDEX IF NOT EXISTS node_expiry_file_idx ON node (ex, file)")
                 .execute(&pool)
@@ -636,6 +650,65 @@ impl DataProvider for PgProvider {
     async fn close(&self) -> Result<()> {
         self.pool.close().await;
         Ok(())
+    }
+
+    async fn put_upload_session(&self, session: &UploadSession) -> Result<()> {
+        let data = bincode::serialize(session)?;
+        let state = match session.state {
+            crate::dataprovider::types::UploadState::Open => "open",
+            crate::dataprovider::types::UploadState::Committed => "committed",
+            crate::dataprovider::types::UploadState::Cancelled => "cancelled",
+        };
+        sqlx::query("INSERT INTO upload_sessions(id,data,owner,state,size,updated_at) VALUES($1,$2,$3,$4,$5,NOW()) ON CONFLICT(id) DO UPDATE SET data=EXCLUDED.data,owner=EXCLUDED.owner,state=EXCLUDED.state,size=EXCLUDED.size,updated_at=NOW()")
+            .bind(&session.id)
+            .bind(data)
+            .bind(&session.owner)
+            .bind(state)
+            .bind(session.size as i64)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx_err)?;
+        Ok(())
+    }
+    async fn get_upload_session(&self, id: &str) -> Result<UploadSession> {
+        let data: Vec<u8> = sqlx::query_scalar("SELECT data FROM upload_sessions WHERE id=$1")
+            .bind(id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(map_sqlx_err)?;
+        Ok(bincode::deserialize(&data)?)
+    }
+    async fn delete_upload_session(&self, id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM upload_sessions WHERE id=$1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx_err)?;
+        Ok(())
+    }
+    async fn storage_usage(&self) -> Result<u64> {
+        let total: i64 =
+            sqlx::query_scalar("SELECT COALESCE(SUM(size),0)::BIGINT FROM fs WHERE NOT dir")
+                .fetch_one(&self.pool)
+                .await
+                .map_err(map_sqlx_err)?;
+        Ok(total.max(0) as u64)
+    }
+
+    async fn upload_quota_usage(&self, owner: &str) -> Result<u64> {
+        let committed: i64 =
+            sqlx::query_scalar("SELECT COALESCE(SUM(size),0)::BIGINT FROM fs WHERE NOT dir")
+                .fetch_one(&self.pool)
+                .await
+                .map_err(map_sqlx_err)?;
+        let reserved: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(size),0)::BIGINT FROM upload_sessions WHERE owner=$1 AND state='open'",
+        )
+        .bind(owner)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(map_sqlx_err)?;
+        Ok(committed.max(0) as u64 + reserved.max(0) as u64)
     }
 }
 

@@ -19,7 +19,9 @@ use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
-use super::types::{err, ApiResponse, AuthConfigResponse, LoginRequest, TokenResponse};
+use super::types::{
+    err, ApiResponse, AuthConfigResponse, LoginRequest, TokenResponse, UploadCapabilities,
+};
 use crate::http::AppState;
 
 const ISSUER: &str = "ddrv";
@@ -49,6 +51,32 @@ struct Claims {
     jti: String,
     iat: i64,
     exp: i64,
+}
+
+/// Identity attached to requests that passed authentication.  The HTTP
+/// configuration currently defines one account, but carrying the identity
+/// through request extensions keeps resource ownership explicit at handlers.
+#[derive(Debug, Clone)]
+pub struct AuthIdentity {
+    pub username: String,
+}
+
+fn configured_identity(cfg: &crate::config::HttpConfig) -> AuthIdentity {
+    AuthIdentity {
+        username: if cfg.username.is_empty() {
+            "anonymous".into()
+        } else {
+            cfg.username.clone()
+        },
+    }
+}
+
+fn attach_identity(
+    mut request: axum::extract::Request,
+    cfg: &crate::config::HttpConfig,
+) -> axum::extract::Request {
+    request.extensions_mut().insert(configured_identity(cfg));
+    request
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -276,8 +304,16 @@ pub async fn logout_handler(State(state): State<AppState>, request: Request) -> 
 
 pub async fn auth_config_handler(State(state): State<AppState>) -> impl IntoResponse {
     ApiResponse::ok(AuthConfigResponse {
-        login: !state.config.username.is_empty(),
+        login: !state.config.username.is_empty() && !state.config.password_hash.is_empty(),
         anonymous: state.config.guest_mode,
+        upload: UploadCapabilities {
+            resumable: true,
+            max_session_size: state.config.upload_session_size_limit,
+            user_quota: state.config.upload_user_quota,
+            max_concurrent_transfers: state.config.upload_concurrent_transfers,
+            requests_per_minute: state.config.upload_requests_per_minute,
+            max_part_size: state.config.upload_memory_limit,
+        },
     })
 }
 pub async fn check_token_handler() -> impl IntoResponse {
@@ -308,18 +344,39 @@ pub async fn auth_middleware(
     request: Request,
     next: Next,
 ) -> Response {
-    if state.config.username.is_empty() {
-        return next.run(request).await;
+    let cfg = &state.config;
+    if cfg.username.is_empty() || cfg.password_hash.is_empty() {
+        return next.run(attach_identity(request, cfg)).await;
     }
     let token = extract_token(request.headers());
+    let is_upload_route = request.uri().path().starts_with("/api/upload-sessions");
     let read_only = matches!(
         *request.method(),
         Method::GET | Method::HEAD | Method::OPTIONS
     );
     let is_check_token = request.uri().path().ends_with("/check_token");
-    if state.config.guest_mode && read_only && token == TokenCandidate::None && !is_check_token {
-        return next.run(request).await;
+    let cookie_token = matches!(&token, TokenCandidate::Cookie(_));
+    // Guest mode + read-only requests can proceed without auth token.
+    // If a token is supplied, it must still be valid.
+    if cfg.guest_mode && read_only && !is_upload_route && !is_check_token {
+        match token {
+            TokenCandidate::None => return next.run(attach_identity(request, cfg)).await,
+            TokenCandidate::Invalid => {
+                return err(StatusCode::UNAUTHORIZED, "missing or invalid token")
+            }
+            TokenCandidate::Bearer(t) | TokenCandidate::Cookie(t) => {
+                if validate_token(cfg, &state.auth, &t).is_ok() {
+                    return next.run(attach_identity(request, cfg)).await;
+                }
+                let mut response = err(StatusCode::UNAUTHORIZED, "invalid token");
+                if cookie_token {
+                    clear_token_cookie(&mut response);
+                }
+                return response;
+            }
+        }
     }
+
     let valid = match &token {
         TokenCandidate::Bearer(t) | TokenCandidate::Cookie(t) => {
             validate_token(&state.config, &state.auth, t).is_ok()
@@ -339,7 +396,7 @@ pub async fn auth_middleware(
     if !read_only && matches!(token, TokenCandidate::Cookie(_)) && !csrf_valid(request.headers()) {
         return err(StatusCode::FORBIDDEN, "missing or invalid CSRF token");
     }
-    next.run(request).await
+    next.run(attach_identity(request, cfg)).await
 }
 
 #[cfg(test)]

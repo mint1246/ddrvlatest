@@ -18,6 +18,11 @@ frontend:
     password: password
     async_write: false
   http:
+    upload_session_size_limit: 107374182400
+    upload_user_quota: 1099511627776
+    upload_concurrent_transfers: 4
+    upload_requests_per_minute: 240
+    upload_memory_limit: 26214400
     addr: ":2526"
     username: username
     password_hash: "$argon2id$v=19$m=19456,t=2,p=1$<salt>$<hash>"

@@ -233,6 +233,32 @@ pub struct HttpConfig {
     pub guest_mode: bool,
     #[serde(default)]
     pub async_write: bool,
+    #[serde(default = "default_upload_session_size")]
+    pub upload_session_size_limit: u64,
+    #[serde(default = "default_upload_user_quota")]
+    pub upload_user_quota: u64,
+    #[serde(default = "default_upload_concurrency")]
+    pub upload_concurrent_transfers: usize,
+    #[serde(default = "default_upload_rate")]
+    pub upload_requests_per_minute: u32,
+    #[serde(default = "default_upload_memory")]
+    pub upload_memory_limit: usize,
+}
+
+fn default_upload_session_size() -> u64 {
+    100 * 1024 * 1024 * 1024
+}
+fn default_upload_user_quota() -> u64 {
+    1024 * 1024 * 1024 * 1024
+}
+fn default_upload_concurrency() -> usize {
+    4
+}
+fn default_upload_rate() -> u32 {
+    240
+}
+fn default_upload_memory() -> usize {
+    25 * 1024 * 1024
 }
 
 impl std::fmt::Debug for HttpConfig {
@@ -247,6 +273,17 @@ impl std::fmt::Debug for HttpConfig {
             .field("access_token_ttl_seconds", &self.access_token_ttl_seconds)
             .field("guest_mode", &self.guest_mode)
             .field("async_write", &self.async_write)
+            .field("upload_session_size_limit", &self.upload_session_size_limit)
+            .field("upload_user_quota", &self.upload_user_quota)
+            .field(
+                "upload_concurrent_transfers",
+                &self.upload_concurrent_transfers,
+            )
+            .field(
+                "upload_requests_per_minute",
+                &self.upload_requests_per_minute,
+            )
+            .field("upload_memory_limit", &self.upload_memory_limit)
             .finish()
     }
 }
@@ -263,6 +300,11 @@ impl Default for HttpConfig {
             access_token_ttl_seconds: default_access_token_ttl_seconds(),
             guest_mode: false,
             async_write: false,
+            upload_session_size_limit: default_upload_session_size(),
+            upload_user_quota: default_upload_user_quota(),
+            upload_concurrent_transfers: default_upload_concurrency(),
+            upload_requests_per_minute: default_upload_rate(),
+            upload_memory_limit: default_upload_memory(),
         }
     }
 }
@@ -547,6 +589,26 @@ pub fn load(config_path: Option<&str>) -> anyhow::Result<Config> {
     }
     if let Ok(v) = std::env::var("HTTP_ASYNC_WRITE") {
         builder = builder.set_override("frontend.http.async_write", v)?;
+    }
+    for (env, key) in [
+        (
+            "UPLOAD_SESSION_SIZE_LIMIT",
+            "frontend.http.upload_session_size_limit",
+        ),
+        ("UPLOAD_USER_QUOTA", "frontend.http.upload_user_quota"),
+        (
+            "UPLOAD_CONCURRENT_TRANSFERS",
+            "frontend.http.upload_concurrent_transfers",
+        ),
+        (
+            "UPLOAD_REQUESTS_PER_MINUTE",
+            "frontend.http.upload_requests_per_minute",
+        ),
+        ("UPLOAD_MEMORY_LIMIT", "frontend.http.upload_memory_limit"),
+    ] {
+        if let Ok(v) = std::env::var(env) {
+            builder = builder.set_override(key, v)?;
+        }
     }
     // Preserve the former environment-variable mappings solely so obsolete TLS
     // configuration is rejected by HttpConfig instead of being silently ignored.

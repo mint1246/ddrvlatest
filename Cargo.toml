@@ -49,6 +49,7 @@ subtle = "2"
 
 # UUID
 uuid = { version = "1", features = ["v4"] }
+sha2 = "0.10"
 
 # Embedded key-value store (redb replaces BoltDB)
 redb = "2"

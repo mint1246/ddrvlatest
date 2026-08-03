@@ -172,6 +172,13 @@ const api = {
     return res.json();
   },
 
+  createUpload(data) { return this._fetch('/api/upload-sessions', { method: 'POST', body: JSON.stringify(data) }); },
+  uploadStatus(id) { return this._fetch('/api/upload-sessions/' + id + '/resume', { method: 'POST' }); },
+  uploadPart(id, index, bytes, hash, signal) {
+    const headers = { 'Content-Type': 'application/octet-stream', 'X-Part-Sha256': hash };
+    if (state.token) headers.Authorization = 'Bearer ' + state.token;
+    return this._fetch(`/api/upload-sessions/${id}/parts/${index}`, { method: 'PUT', headers, body: bytes, signal });
+  },
   uploadFile(dirId, file, onProgress) {
     return new Promise((resolve, reject) => {
       const formData = new FormData();
@@ -199,6 +206,8 @@ const api = {
       xhr.send(formData);
     });
   },
+  commitUpload(id) { return this._fetch('/api/upload-sessions/' + id + '/commit', { method: 'POST' }); },
+  cancelUpload(id) { return this._fetch('/api/upload-sessions/' + id, { method: 'DELETE' }); },
 };
 
 /* ══════════════════════════════════════════════════════════
@@ -1099,16 +1108,39 @@ async function uploadFiles(files) {
       </div>
       <div class="progress-track">
         <div class="progress-fill" style="width:0%"></div>
+      </div><div class="upload-actions">
+        <button class="upload-pause" type="button">Pause</button>
+        <button class="upload-cancel" type="button">Cancel</button>
       </div>`;
     progressContainer.appendChild(card);
 
     try {
-      await api.uploadFile(dirId, file, pct => {
-        const pctEl = card.querySelector('.upload-pct');
-        const fillEl = card.querySelector('.progress-fill');
-        if (pctEl) pctEl.textContent = pct + '%';
-        if (fillEl) fillEl.style.width = pct + '%';
-      });
+      const key = `ddrv-upload:${dirId}:${file.name}:${file.size}:${file.lastModified}`;
+      let sessionId = localStorage.getItem(key);
+      let session;
+      if (sessionId) {
+        try { session = (await api.uploadStatus(sessionId)).data; }
+        catch (_) { localStorage.removeItem(key); sessionId = null; }
+      }
+      const cap = state.config.upload || {};
+      if (!sessionId) {
+        session = (await api.createUpload({ name:file.name, parent:dirId, size:file.size, part_size:cap.max_part_size })).data;
+        sessionId = session.id; localStorage.setItem(key, sessionId);
+      }
+      const control = { paused:false, cancelled:false, waiters:[], controllers:new Set() };
+      const pauseBtn = card.querySelector('.upload-pause');
+      pauseBtn.onclick = () => { control.paused=!control.paused; pauseBtn.textContent=control.paused?'Resume':'Pause'; if(!control.paused) control.waiters.splice(0).forEach(r=>r()); };
+      card.querySelector('.upload-cancel').onclick = async () => { control.cancelled=true; control.controllers.forEach(c=>c.abort()); await api.cancelUpload(sessionId).catch(()=>{}); localStorage.removeItem(key); card.remove(); };
+      const completed = new Set(Object.keys(session.completed_parts || {}).map(Number));
+      const count = Math.ceil(file.size / session.part_size); let doneBytes=0;
+      completed.forEach(i => { doneBytes += Math.min(session.part_size, file.size-i*session.part_size); });
+      const update = () => { const pct=file.size?Math.round(doneBytes/file.size*100):100; card.querySelector('.upload-pct').textContent=pct+'%'; card.querySelector('.progress-fill').style.width=pct+'%'; };
+      update(); const queue=Array.from({length:count},(_,i)=>i).filter(i=>!completed.has(i));
+      const waitIfPaused = () => control.paused ? new Promise(r=>control.waiters.push(r)) : Promise.resolve();
+      const worker = async () => { while(queue.length && !control.cancelled) { await waitIfPaused(); if(control.cancelled)return; const i=queue.shift(); const blob=file.slice(i*session.part_size,Math.min(file.size,(i+1)*session.part_size)); const bytes=await blob.arrayBuffer(); const hash=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes))).map(b=>b.toString(16).padStart(2,'0')).join('');
+          let last; for(let attempt=0;attempt<3;attempt++){const ctl=new AbortController();control.controllers.add(ctl);try{await api.uploadPart(sessionId,i,bytes,hash,ctl.signal);last=null;break}catch(e){last=e;if(e.status&&e.status<500&&e.status!==429)break;await new Promise(r=>setTimeout(r,500*2**attempt));}finally{control.controllers.delete(ctl)}} if(last)throw last; doneBytes+=blob.size;update(); } };
+      const parallel=Math.max(1,Math.min(cap.max_concurrent_transfers||3,queue.length||1)); await Promise.all(Array.from({length:parallel},worker));
+      if(control.cancelled)continue; await api.commitUpload(sessionId); localStorage.removeItem(key);
       card.remove();
       showSnack('Uploaded ' + file.name);
     } catch (err) {

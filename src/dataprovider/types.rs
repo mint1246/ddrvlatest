@@ -1,6 +1,39 @@
+use crate::ddrv::types::Node;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use thiserror::Error;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UploadState {
+    Open,
+    Committed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UploadPart {
+    pub index: u32,
+    pub size: u64,
+    pub sha256: String,
+    pub nodes: Vec<Node>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UploadSession {
+    pub id: String,
+    pub owner: String,
+    pub parent: String,
+    pub name: String,
+    pub size: u64,
+    pub part_size: u64,
+    pub state: UploadState,
+    pub parts: BTreeMap<u32, UploadPart>,
+    pub file_id: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
 
 /// File/directory metadata stored in the data provider.
 #[derive(Debug, Clone, Serialize, Deserialize)]

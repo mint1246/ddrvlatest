@@ -6,6 +6,7 @@ use chrono::{DateTime, Utc};
 use redb::{Database, ReadableTable, Table, TableDefinition};
 use serde::{Deserialize, Serialize};
 
+use crate::dataprovider::types::UploadSession;
 use crate::dataprovider::{DataProvider, DataProviderError, DueNodeGroup, File, Result};
 use crate::ddrv::{Driver, Node};
 
@@ -13,6 +14,9 @@ use crate::ddrv::{Driver, Node};
 
 const FS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("fs");
 const NODES_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("nodes");
+const UPLOADS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("upload_sessions");
+const USAGE_TABLE: TableDefinition<&str, u64> = TableDefinition::new("storage_usage");
+const USAGE_KEY: &str = "total";
 const EXPIRY_TABLE: TableDefinition<&str, &str> = TableDefinition::new("node_expiry");
 const EXPIRY_PATH_TABLE: TableDefinition<&str, &str> = TableDefinition::new("node_expiry_path");
 const ROOT: &str = "/";
@@ -163,6 +167,20 @@ fn node_range_end(path: &str) -> String {
     format!("{}\x01", path)
 }
 
+fn adjust_storage_usage(table: &mut Table<'_, &str, u64>, delta: i64) -> Result<()> {
+    let current = table
+        .get(USAGE_KEY)?
+        .map(|value| value.value())
+        .unwrap_or(0);
+    let updated = if delta >= 0 {
+        current.saturating_add(delta as u64)
+    } else {
+        current.saturating_sub(delta.saturating_abs() as u64)
+    };
+    table.insert(USAGE_KEY, updated)?;
+    Ok(())
+}
+
 fn expiry_key(expiry: i64, path: &str) -> String {
     format!("{:020}\x00{}", expiry, path)
 }
@@ -208,6 +226,7 @@ impl BoltDbProvider {
         let write_txn = db.begin_write()?;
         {
             let nodes = write_txn.open_table(NODES_TABLE)?;
+            write_txn.open_table(UPLOADS_TABLE)?;
             let mut expiry = write_txn.open_table(EXPIRY_TABLE)?;
             let mut expiry_paths = write_txn.open_table(EXPIRY_PATH_TABLE)?;
             // Rebuild on open so databases created by older releases acquire a
@@ -249,16 +268,37 @@ impl BoltDbProvider {
             if let Some(previous) = current_path {
                 replace_expiry_index(&mut expiry, &mut expiry_paths, &previous, &current_nodes)?;
             }
-            let mut fs_table = write_txn.open_table(FS_TABLE)?;
-            if fs_table.get(ROOT)?.is_none() {
-                let root = StoredFile {
-                    name: ROOT.to_string(),
-                    dir: true,
-                    size: 0,
-                    mtime: Utc::now(),
-                };
-                let data = bincode::serialize(&root)?;
-                fs_table.insert(ROOT, data.as_slice())?;
+            let initial_usage = {
+                let mut fs_table = write_txn.open_table(FS_TABLE)?;
+                if fs_table.get(ROOT)?.is_none() {
+                    let root = StoredFile {
+                        name: ROOT.to_string(),
+                        dir: true,
+                        size: 0,
+                        mtime: Utc::now(),
+                    };
+                    let data = bincode::serialize(&root)?;
+                    fs_table.insert(ROOT, data.as_slice())?;
+                }
+
+                let usage_table = write_txn.open_table(USAGE_TABLE)?;
+                if usage_table.get(USAGE_KEY)?.is_none() {
+                    let mut total = 0u64;
+                    for item in fs_table.iter()? {
+                        let (_, value) = item?;
+                        let file: StoredFile = bincode::deserialize(value.value())?;
+                        if !file.dir {
+                            total = total.saturating_add(file.size.max(0) as u64);
+                        }
+                    }
+                    Some(total)
+                } else {
+                    None
+                }
+            };
+            if let Some(total) = initial_usage {
+                let mut usage_table = write_txn.open_table(USAGE_TABLE)?;
+                usage_table.insert(USAGE_KEY, total)?;
             }
         }
         write_txn.commit()?;
@@ -645,6 +685,7 @@ impl DataProvider for BoltDbProvider {
             };
 
             let write_txn = db.begin_write()?;
+            let mut usage_delta = 0i64;
             {
                 let mut fs_table = write_txn.open_table(FS_TABLE)?;
                 let mut nodes_table = write_txn.open_table(NODES_TABLE)?;
@@ -680,10 +721,18 @@ impl DataProvider for BoltDbProvider {
                 let existing = fs_table.get(path.as_str())?.map(|g| g.value().to_vec());
                 if let Some(raw) = existing {
                     let mut sf: StoredFile = bincode::deserialize(&raw)?;
+                    let old_size = sf.size;
+                    if !sf.dir {
+                        usage_delta = new_size.saturating_sub(old_size);
+                    }
                     sf.size = new_size;
                     let data = bincode::serialize(&sf)?;
                     fs_table.insert(path.as_str(), data.as_slice())?;
                 }
+            }
+            if usage_delta != 0 {
+                let mut usage_table = write_txn.open_table(USAGE_TABLE)?;
+                adjust_storage_usage(&mut usage_table, usage_delta)?;
             }
             let indexed_nodes = collect_nodes(&write_txn.open_table(NODES_TABLE)?, &path)?;
             {
@@ -705,6 +754,7 @@ impl DataProvider for BoltDbProvider {
         tokio::task::spawn_blocking(move || -> Result<()> {
             let db = db.write().unwrap();
             let write_txn = db.begin_write()?;
+            let mut usage_delta = 0i64;
             {
                 let mut nodes_table = write_txn.open_table(NODES_TABLE)?;
                 let mut fs_table = write_txn.open_table(FS_TABLE)?;
@@ -725,10 +775,17 @@ impl DataProvider for BoltDbProvider {
                 let existing = fs_table.get(path.as_str())?.map(|g| g.value().to_vec());
                 if let Some(raw) = existing {
                     let mut sf: StoredFile = bincode::deserialize(&raw)?;
+                    if !sf.dir {
+                        usage_delta = sf.size.saturating_neg();
+                    }
                     sf.size = 0;
                     let data = bincode::serialize(&sf)?;
                     fs_table.insert(path.as_str(), data.as_slice())?;
                 }
+            }
+            if usage_delta != 0 {
+                let mut usage_table = write_txn.open_table(USAGE_TABLE)?;
+                adjust_storage_usage(&mut usage_table, usage_delta)?;
             }
             {
                 let mut expiry = write_txn.open_table(EXPIRY_TABLE)?;
@@ -976,15 +1033,27 @@ impl DataProvider for BoltDbProvider {
             };
 
             let write_txn = db.begin_write()?;
+            let mut removed_size = 0u64;
             {
                 let mut fs_table = write_txn.open_table(FS_TABLE)?;
                 let mut nodes_table = write_txn.open_table(NODES_TABLE)?;
                 for p in &fs_paths {
+                    if let Some(value) = fs_table.get(p.as_str())? {
+                        let file: StoredFile = bincode::deserialize(value.value())?;
+                        if !file.dir {
+                            removed_size = removed_size.saturating_add(file.size.max(0) as u64);
+                        }
+                    }
                     fs_table.remove(p.as_str())?;
                 }
                 for k in &node_keys {
                     nodes_table.remove(k.as_str())?;
                 }
+            }
+            if removed_size > 0 {
+                let delta = -(removed_size.min(i64::MAX as u64) as i64);
+                let mut usage_table = write_txn.open_table(USAGE_TABLE)?;
+                adjust_storage_usage(&mut usage_table, delta)?;
             }
             {
                 let mut expiry = write_txn.open_table(EXPIRY_TABLE)?;
@@ -1123,6 +1192,97 @@ impl DataProvider for BoltDbProvider {
     async fn close(&self) -> Result<()> {
         // redb flushes on every commit; nothing extra needed here.
         Ok(())
+    }
+
+    async fn put_upload_session(&self, session: &UploadSession) -> Result<()> {
+        let db = Arc::clone(&self.db);
+        let session = session.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let db = db.write().unwrap();
+            let tx = db.begin_write()?;
+            {
+                let mut table = tx.open_table(UPLOADS_TABLE)?;
+                let bytes = bincode::serialize(&session)?;
+                table.insert(session.id.as_str(), bytes.as_slice())?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| DataProviderError::Other(e.to_string()))?
+    }
+
+    async fn get_upload_session(&self, id: &str) -> Result<UploadSession> {
+        let db = Arc::clone(&self.db);
+        let id = id.to_owned();
+        tokio::task::spawn_blocking(move || -> Result<UploadSession> {
+            let db = db.read().unwrap();
+            let tx = db.begin_read()?;
+            let table = tx.open_table(UPLOADS_TABLE)?;
+            let value = table.get(id.as_str())?.ok_or(DataProviderError::NotFound)?;
+            Ok(bincode::deserialize(value.value())?)
+        })
+        .await
+        .map_err(|e| DataProviderError::Other(e.to_string()))?
+    }
+
+    async fn delete_upload_session(&self, id: &str) -> Result<()> {
+        let db = Arc::clone(&self.db);
+        let id = id.to_owned();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let db = db.write().unwrap();
+            let tx = db.begin_write()?;
+            {
+                let mut table = tx.open_table(UPLOADS_TABLE)?;
+                table.remove(id.as_str())?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| DataProviderError::Other(e.to_string()))?
+    }
+
+    async fn storage_usage(&self) -> Result<u64> {
+        let db = Arc::clone(&self.db);
+        tokio::task::spawn_blocking(move || -> Result<u64> {
+            let db = db.read().unwrap();
+            let tx = db.begin_read()?;
+            let table = tx.open_table(USAGE_TABLE)?;
+            Ok(table
+                .get(USAGE_KEY)?
+                .map(|value| value.value())
+                .unwrap_or(0))
+        })
+        .await
+        .map_err(|e| DataProviderError::Other(e.to_string()))?
+    }
+
+    async fn upload_quota_usage(&self, owner: &str) -> Result<u64> {
+        let db = Arc::clone(&self.db);
+        let owner = owner.to_owned();
+        tokio::task::spawn_blocking(move || -> Result<u64> {
+            let db = db.read().unwrap();
+            let tx = db.begin_read()?;
+            let mut total = tx
+                .open_table(USAGE_TABLE)?
+                .get(USAGE_KEY)?
+                .map(|value| value.value())
+                .unwrap_or(0);
+            let uploads = tx.open_table(UPLOADS_TABLE)?;
+            for row in uploads.iter()? {
+                let (_, value) = row?;
+                let session: UploadSession = bincode::deserialize(value.value())?;
+                if session.owner == owner
+                    && matches!(session.state, crate::dataprovider::types::UploadState::Open)
+                {
+                    total = total.saturating_add(session.size);
+                }
+            }
+            Ok(total)
+        })
+        .await
+        .map_err(|e| DataProviderError::Other(e.to_string()))?
     }
 }
 
