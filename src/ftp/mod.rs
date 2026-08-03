@@ -428,3 +428,317 @@ async fn fetch_public_ip() -> Option<std::net::Ipv4Addr> {
     let text = resp.text().await.ok()?;
     text.trim().parse().ok()
 }
+
+#[cfg(test)]
+mod protocol_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use libunftp::auth::{AuthenticationError, Authenticator, Credentials, DefaultUser};
+    use libunftp::storage::{Fileinfo, StorageBackend, FEATURE_RESTART};
+    use std::io::Cursor;
+    use std::net::SocketAddr;
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
+    use std::time::SystemTime;
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::TcpStream;
+
+    #[derive(Clone, Debug)]
+    struct MockStorage {
+        state: Arc<Mutex<MockState>>,
+    }
+
+    #[derive(Debug)]
+    struct MockState {
+        data: Vec<u8>,
+        last_start_pos: Option<u64>,
+    }
+
+    #[derive(Debug)]
+    struct MockMetadata {
+        len: u64,
+    }
+
+    impl Metadata for MockMetadata {
+        fn len(&self) -> u64 {
+            self.len
+        }
+
+        fn is_dir(&self) -> bool {
+            false
+        }
+
+        fn is_file(&self) -> bool {
+            true
+        }
+
+        fn is_symlink(&self) -> bool {
+            false
+        }
+
+        fn modified(&self) -> Result<SystemTime> {
+            Ok(SystemTime::UNIX_EPOCH)
+        }
+
+        fn gid(&self) -> u32 {
+            0
+        }
+
+        fn uid(&self) -> u32 {
+            0
+        }
+    }
+
+    fn mock_error(message: &str) -> Error {
+        Error::new(ErrorKind::LocalError, std::io::Error::other(message))
+    }
+
+    #[async_trait]
+    impl StorageBackend<DefaultUser> for MockStorage {
+        type Metadata = MockMetadata;
+
+        fn supported_features(&self) -> u32 {
+            FEATURE_RESTART
+        }
+
+        async fn metadata<P: AsRef<Path> + Send + Debug>(
+            &self,
+            _user: &DefaultUser,
+            _path: P,
+        ) -> Result<Self::Metadata> {
+            let len = self.state.lock().unwrap().data.len() as u64;
+            Ok(MockMetadata { len })
+        }
+
+        async fn list<P: AsRef<Path> + Send + Debug>(
+            &self,
+            _user: &DefaultUser,
+            _path: P,
+        ) -> Result<Vec<Fileinfo<PathBuf, Self::Metadata>>> {
+            Ok(Vec::new())
+        }
+
+        async fn get<P: AsRef<Path> + Send + Debug>(
+            &self,
+            _user: &DefaultUser,
+            _path: P,
+            start_pos: u64,
+        ) -> Result<Box<dyn tokio::io::AsyncRead + Send + Sync + Unpin>> {
+            let data = self.state.lock().unwrap().data.clone();
+            let start = usize::try_from(start_pos).map_err(|_| mock_error("offset overflow"))?;
+            if start > data.len() {
+                return Err(mock_error("offset beyond EOF"));
+            }
+            Ok(Box::new(Cursor::new(data[start..].to_vec())))
+        }
+
+        async fn put<
+            P: AsRef<Path> + Send + Debug,
+            R: tokio::io::AsyncRead + Send + Sync + Unpin + 'static,
+        >(
+            &self,
+            _user: &DefaultUser,
+            mut input: R,
+            _path: P,
+            start_pos: u64,
+        ) -> Result<u64> {
+            let mut suffix = Vec::new();
+            input
+                .read_to_end(&mut suffix)
+                .await
+                .map_err(|e| Error::new(ErrorKind::LocalError, e))?;
+            let mut state = self.state.lock().unwrap();
+            let start = usize::try_from(start_pos).map_err(|_| mock_error("offset overflow"))?;
+            if start > state.data.len() {
+                return Err(mock_error("offset beyond EOF"));
+            }
+            state.data.truncate(start);
+            state.data.extend_from_slice(&suffix);
+            state.last_start_pos = Some(start_pos);
+            Ok(suffix.len() as u64)
+        }
+
+        async fn del<P: AsRef<Path> + Send + Debug>(
+            &self,
+            _user: &DefaultUser,
+            _path: P,
+        ) -> Result<()> {
+            Err(mock_error("unused"))
+        }
+
+        async fn mkd<P: AsRef<Path> + Send + Debug>(
+            &self,
+            _user: &DefaultUser,
+            _path: P,
+        ) -> Result<()> {
+            Err(mock_error("unused"))
+        }
+
+        async fn rename<P: AsRef<Path> + Send + Debug>(
+            &self,
+            _user: &DefaultUser,
+            _from: P,
+            _to: P,
+        ) -> Result<()> {
+            Err(mock_error("unused"))
+        }
+
+        async fn rmd<P: AsRef<Path> + Send + Debug>(
+            &self,
+            _user: &DefaultUser,
+            _path: P,
+        ) -> Result<()> {
+            Err(mock_error("unused"))
+        }
+
+        async fn cwd<P: AsRef<Path> + Send + Debug>(
+            &self,
+            _user: &DefaultUser,
+            _path: P,
+        ) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[derive(Debug)]
+    struct MockAuthenticator;
+
+    #[async_trait]
+    impl Authenticator<DefaultUser> for MockAuthenticator {
+        async fn authenticate(
+            &self,
+            _username: &str,
+            _creds: &Credentials,
+        ) -> std::result::Result<DefaultUser, AuthenticationError> {
+            Ok(DefaultUser)
+        }
+    }
+
+    async fn read_reply(control: &mut BufReader<TcpStream>) -> String {
+        let mut line = String::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            control.read_line(&mut line),
+        )
+        .await
+        .expect("FTP control reply timed out")
+        .expect("FTP control reply failed");
+        line
+    }
+
+    async fn command(control: &mut BufReader<TcpStream>, command: &str) -> String {
+        control
+            .get_mut()
+            .write_all(format!("{command}\r\n").as_bytes())
+            .await
+            .unwrap();
+        control.get_mut().flush().await.unwrap();
+        read_reply(control).await
+    }
+
+    async fn multiline_command(control: &mut BufReader<TcpStream>, line: &str) -> String {
+        let first = command(control, line).await;
+        if first.len() >= 4 && first.as_bytes()[3] == b'-' {
+            let code = first[..3].to_owned();
+            let mut output = first;
+            loop {
+                let line = read_reply(control).await;
+                let done = line.starts_with(&format!("{code} "));
+                output.push_str(&line);
+                if done {
+                    return output;
+                }
+            }
+        }
+        first
+    }
+
+    fn passive_addr(reply: &str) -> SocketAddr {
+        let values = reply
+            .split_once('(')
+            .and_then(|(_, rest)| rest.split_once(')'))
+            .expect("invalid PASV response")
+            .0
+            .split(',')
+            .map(|v| v.parse::<u16>().expect("invalid PASV value"))
+            .collect::<Vec<_>>();
+        assert_eq!(values.len(), 6);
+        SocketAddr::from((
+            [
+                values[0] as u8,
+                values[1] as u8,
+                values[2] as u8,
+                values[3] as u8,
+            ],
+            values[4] * 256 + values[5],
+        ))
+    }
+
+    async fn connect_control(addr: SocketAddr) -> BufReader<TcpStream> {
+        for _ in 0..50 {
+            if let Ok(stream) = TcpStream::connect(addr).await {
+                return BufReader::new(stream);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("FTP server did not accept a connection")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ftp_protocol_supports_size_and_restart_for_retr_and_stor() {
+        let state = Arc::new(Mutex::new(MockState {
+            data: b"hello world".to_vec(),
+            last_start_pos: None,
+        }));
+        let storage = MockStorage {
+            state: Arc::clone(&state),
+        };
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+
+        let server = libunftp::ServerBuilder::new(Box::new(move || storage.clone()))
+            .authenticator(Arc::new(MockAuthenticator))
+            .greeting("FTP protocol test")
+            .build()
+            .unwrap();
+        let server_task = tokio::spawn(server.listen(addr.to_string()));
+
+        let mut control = connect_control(addr).await;
+        assert!(read_reply(&mut control).await.starts_with("220"));
+        assert!(command(&mut control, "USER test").await.starts_with("331"));
+        assert!(command(&mut control, "PASS test").await.starts_with("230"));
+
+        let feat = multiline_command(&mut control, "FEAT").await;
+        assert!(feat.contains(" SIZE\r\n"));
+        assert!(feat.contains(" REST STREAM\r\n"));
+        assert_eq!(command(&mut control, "SIZE file").await, "213 11\r\n");
+
+        assert!(command(&mut control, "REST 6").await.starts_with("350"));
+        let pasv = command(&mut control, "PASV").await;
+        let mut data = TcpStream::connect(passive_addr(&pasv)).await.unwrap();
+        assert!(command(&mut control, "RETR file").await.starts_with("150"));
+        let mut downloaded = Vec::new();
+        data.read_to_end(&mut downloaded).await.unwrap();
+        assert_eq!(downloaded, b"world");
+        assert!(read_reply(&mut control).await.starts_with("226"));
+
+        assert!(command(&mut control, "REST 6").await.starts_with("350"));
+        let pasv = command(&mut control, "PASV").await;
+        let mut data = TcpStream::connect(passive_addr(&pasv)).await.unwrap();
+        assert!(command(&mut control, "STOR file").await.starts_with("150"));
+        data.write_all(b"DDRV").await.unwrap();
+        data.shutdown().await.unwrap();
+        assert!(read_reply(&mut control).await.starts_with("226"));
+
+        let (last_start_pos, final_data) = {
+            let final_state = state.lock().unwrap();
+            (final_state.last_start_pos, final_state.data.clone())
+        };
+        assert_eq!(last_start_pos, Some(6));
+        assert_eq!(final_data, b"hello DDRV");
+
+        let _ = command(&mut control, "QUIT").await;
+        server_task.abort();
+    }
+}
