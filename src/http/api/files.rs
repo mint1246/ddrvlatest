@@ -555,9 +555,13 @@ pub async fn manifest_file_handler(
         let url = encode_attachment_url(&n.url, n.ex, n.is, &n.hm);
         let preferred = discord_cdn_download_url(&url, state.config.cdn_proxy_base.as_deref());
 
-        // Guarantee returned links are valid: if the preferred download URL fails,
-        // fall back to the canonical URL that was already validated above.
-        let download_url = if probe_manifest_url(&preferred).await == ProbeOutcome::Healthy {
+        // When a CDN proxy is configured, keep the proxy URL as the preferred
+        // browser-facing route even if its probe is currently unhealthy. Falling
+        // back to the Discord URL defeats the proxy and causes a browser CORS
+        // failure; the client can renew this chunk if the attachment has expired.
+        let download_url = if state.config.cdn_proxy_base.is_some()
+            || probe_manifest_url(&preferred).await == ProbeOutcome::Healthy
+        {
             preferred
         } else {
             url.clone()
