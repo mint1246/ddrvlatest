@@ -24,4 +24,8 @@ go.work
 .env
 /ddrv
 config.yaml
+runtime-data/
 target/
+web/node_modules/
+web/coverage/
+web/*.tsbuildinfo

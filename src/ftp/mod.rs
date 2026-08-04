@@ -78,7 +78,25 @@ impl std::fmt::Debug for DdrvStorage {
 
 impl DdrvStorage {
     fn path_str<P: AsRef<Path>>(p: P) -> String {
-        p.as_ref().to_string_lossy().into_owned()
+        let raw = p.as_ref().to_string_lossy().replace('\\', "/");
+        if raw.is_empty() || raw == "." {
+            "/".to_owned()
+        } else if raw.starts_with('/') {
+            raw
+        } else {
+            format!("/{raw}")
+        }
+    }
+
+    fn synthetic_root() -> crate::dataprovider::types::File {
+        crate::dataprovider::types::File {
+            id: "root".into(),
+            name: "/".into(),
+            dir: true,
+            size: 0,
+            parent: None,
+            mtime: chrono::Utc::now(),
+        }
     }
 }
 
@@ -106,7 +124,12 @@ impl StorageBackend<DefaultUser> for DdrvStorage {
         path: P,
     ) -> Result<Self::Metadata> {
         let dp = crate::dataprovider::get();
-        let file = dp.stat(&Self::path_str(path)).await.map_err(dp_err)?;
+        let path = Self::path_str(path);
+        let file = match dp.stat(&path).await {
+            Ok(file) => file,
+            Err(DataProviderError::NotFound) if path == "/" => Self::synthetic_root(),
+            Err(e) => return Err(dp_err(e)),
+        };
         Ok(DdrvMetadata { inner: file })
     }
 
@@ -116,7 +139,16 @@ impl StorageBackend<DefaultUser> for DdrvStorage {
         path: P,
     ) -> Result<Vec<Fileinfo<PathBuf, Self::Metadata>>> {
         let dp = crate::dataprovider::get();
-        let files = dp.ls(&Self::path_str(path), 0, 0).await.map_err(dp_err)?;
+        let path = Self::path_str(path);
+        let files = match dp.ls(&path, 0, 0).await {
+            Ok(files) => files,
+            // Older migrated databases may not contain an explicit root row;
+            // get_children still knows how to enumerate its direct children.
+            Err(DataProviderError::NotFound) if path == "/" => {
+                dp.get_children("root").await.map_err(dp_err)?
+            }
+            Err(e) => return Err(dp_err(e)),
+        };
 
         let result = files
             .into_iter()
@@ -332,7 +364,12 @@ impl StorageBackend<DefaultUser> for DdrvStorage {
 
     async fn cwd<P: AsRef<Path> + Send + Debug>(&self, _user: &DefaultUser, path: P) -> Result<()> {
         let dp = crate::dataprovider::get();
-        dp.stat(&Self::path_str(path)).await.map_err(dp_err)?;
+        let path = Self::path_str(path);
+        match dp.stat(&path).await {
+            Ok(_) => {}
+            Err(DataProviderError::NotFound) if path == "/" => {}
+            Err(e) => return Err(dp_err(e)),
+        }
         Ok(())
     }
 }
@@ -406,10 +443,21 @@ pub async fn serve(
         }
     }
 
-    // Fetch public IP for passive mode
-    let public_ip = fetch_public_ip().await;
-    if let Some(ip) = public_ip {
-        builder = builder.passive_host(libunftp::options::PassiveHost::Ip(ip));
+    // A loopback listener must advertise the loopback/peer address in PASV
+    // responses. Advertising the machine's public IP here breaks local FTP
+    // clients: the control connection succeeds, but LIST/RETR cannot open the
+    // passive data connection. Public-IP advertisement remains useful for
+    // wildcard/external listeners behind NAT.
+    let bind_host = config
+        .addr
+        .rsplit_once(':')
+        .map(|(host, _)| host.trim_matches(['[', ']']))
+        .unwrap_or(config.addr.as_str());
+    let is_loopback = matches!(bind_host, "127.0.0.1" | "localhost" | "::1");
+    if !is_loopback {
+        if let Some(ip) = fetch_public_ip().await {
+            builder = builder.passive_host(libunftp::options::PassiveHost::Ip(ip));
+        }
     }
 
     let server = builder.build()?;

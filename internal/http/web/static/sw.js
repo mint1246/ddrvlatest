@@ -1,71 +1,49 @@
-/**
- * DDrv Service Worker
- * Caches static assets for offline use and faster loading.
- */
+/** DDrv application shell service worker. */
+const CACHE = 'ddrv-react-v3';
+const SHELL = ['/', '/manifest.json', '/logo.svg', '/icon-192.svg', '/icon-512.svg'];
 
-const CACHE_VERSION = 'ddrv-cache-v1';
-const STATIC_ASSETS = [
-  '/',
-  '/style.css',
-  '/app.js',
-  '/logo.svg',
-  '/icon-192.svg',
-  '/icon-512.svg',
-  '/manifest.json',
-];
-
-// Install: pre-cache static assets
-self.addEventListener('install', event => {
+self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(CACHE_VERSION).then(cache => cache.addAll(STATIC_ASSETS))
-      .then(() => self.skipWaiting())
+    caches.open(CACHE)
+      .then((cache) => Promise.all(SHELL.map((url) => cache.add(url).catch(() => undefined))))
+      .then(() => self.skipWaiting()),
   );
 });
 
-// Activate: clean up old caches
-self.addEventListener('activate', event => {
+self.addEventListener('activate', (event) => {
   event.waitUntil(
-    caches.keys().then(keys =>
-      Promise.all(keys.filter(k => k !== CACHE_VERSION).map(k => caches.delete(k)))
-    ).then(() => self.clients.claim())
+    caches.keys()
+      .then((keys) => Promise.all(keys.filter((key) => key.startsWith('ddrv-') && key !== CACHE).map((key) => caches.delete(key))))
+      .then(() => self.clients.claim()),
   );
 });
 
-// Fetch: network-first for API, cache-first for static
-self.addEventListener('fetch', event => {
+self.addEventListener('fetch', (event) => {
   const { request } = event;
   const url = new URL(request.url);
+  if (request.method !== 'GET' || url.origin !== self.location.origin) return;
+  if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/files/')) return;
 
-  // Always go to network for API and file downloads
-  if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/files/')) {
-    return; // let browser handle it
-  }
-
-  // For Google Fonts, use stale-while-revalidate
-  if (url.hostname === 'fonts.googleapis.com' || url.hostname === 'fonts.gstatic.com') {
+  if (request.mode === 'navigate') {
     event.respondWith(
-      caches.open(CACHE_VERSION + '-fonts').then(async cache => {
-        const cached = await cache.match(request);
-        const fetchPromise = fetch(request).then(res => {
-          cache.put(request, res.clone());
-          return res;
-        }).catch(() => null);
-        return cached || fetchPromise;
-      })
+      fetch(request)
+        .then((response) => {
+          if (response.ok) caches.open(CACHE).then((cache) => cache.put('/', response.clone()));
+          return response;
+        })
+        .catch(() => caches.match('/').then((cached) => cached || Response.error())),
     );
     return;
   }
 
-  // Cache-first for static assets, network-first fallback
   event.respondWith(
-    caches.match(request).then(cached => {
-      const networkFetch = fetch(request).then(res => {
-        if (res.ok && request.method === 'GET') {
-          caches.open(CACHE_VERSION).then(cache => cache.put(request, res.clone()));
-        }
-        return res;
-      });
-      return cached || networkFetch;
-    }).catch(() => caches.match('/'))
+    caches.open(CACHE).then(async (cache) => {
+      const cached = await cache.match(request);
+      const network = fetch(request).then((response) => {
+        if (response.ok) cache.put(request, response.clone());
+        return response;
+      }).catch(() => cached || Response.error());
+      return cached || network;
+    }),
   );
 });

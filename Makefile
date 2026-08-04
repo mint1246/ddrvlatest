@@ -1,6 +1,10 @@
 BINARY_NAME=ddrv
 
-build:
+build-web:
+	npm --prefix web ci
+	npm --prefix web run build
+
+build: build-web
 	cargo build --release
 	cp target/release/$(BINARY_NAME) ./$(BINARY_NAME)
 
@@ -21,6 +25,7 @@ clean:
 
 test:
 	cargo test
+	npm --prefix web test
 
 fmt:
 	cargo fmt

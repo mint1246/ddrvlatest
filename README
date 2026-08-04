@@ -13,6 +13,7 @@ HIGHLIGHTS
 - Supports HTTP and FTP frontends.
 - Metadata backends: redb (embedded) and PostgreSQL.
 - HTTP supports partial downloads (Range requests).
+- React and TypeScript HTTP workspace with a responsive Material 3 Expressive UI.
 - HTTPS must be terminated by a reverse proxy or load balancer; the built-in
   frontend serves plain HTTP only. TLS configuration keys are rejected so that
   a configuration cannot silently claim to enable HTTPS.
@@ -25,6 +26,7 @@ REQUIREMENTS
 USAGE
 -----
 - Build: `cargo build --release`
+- Rebuild the embedded HTTP UI: `npm --prefix web ci && npm --prefix web run build`
 - Run: `./target/release/ddrv --config=config.yaml`
 - Migrate old master BoltDB to rewrite redb with main binary:
   `./target/release/ddrv --migrate /path/to/legacy.db --migrate-output /path/to/new.redb`
@@ -44,7 +46,15 @@ USAGE DOCKER
 BUILD FROM SOURCE
 -----------------
 - Clone this repository
-- `cargo build --release`
+- `make build` (builds the React UI and Rust binary)
+- For a Rust-only rebuild using the checked-in web assets: `cargo build --release`
+
+HTTP UI DEVELOPMENT
+-------------------
+- Install frontend dependencies: `npm --prefix web ci`
+- Start Vite with API and file routes proxied to DDrv on port 2525: `npm --prefix web run dev`
+- Production output is written to `internal/http/web/static` and embedded in the Rust binary.
+- Run frontend checks with `npm --prefix web run typecheck` and `npm --prefix web test`.
 
 CONFIGURATION FILE
 ------------------
