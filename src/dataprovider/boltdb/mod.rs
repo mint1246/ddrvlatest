@@ -57,7 +57,14 @@ fn decode_path(id: &str) -> Result<String> {
 }
 
 fn clean_path(p: &str) -> String {
-    path_clean::clean(p).to_string_lossy().into_owned()
+    let cleaned = path_clean::clean(p).to_string_lossy().replace('\\', "/");
+    if cleaned.is_empty() || cleaned == "." {
+        ROOT.to_owned()
+    } else if cleaned.starts_with('/') {
+        cleaned
+    } else {
+        format!("/{cleaned}")
+    }
 }
 
 /// Return the parent path component (never empty; root's parent is ROOT).
