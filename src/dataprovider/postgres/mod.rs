@@ -1,9 +1,14 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sqlx::{Postgres, QueryBuilder, Row as _};
+use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
+use tracing::warn;
 
-use crate::dataprovider::{DataProvider, DataProviderError, File, Result};
+use crate::dataprovider::{
+    DataProvider, DataProviderError, DueNodeGroup, File, Result, UploadSession,
+};
 use crate::ddrv::{Driver, Node};
 
 // ── error mapping ─────────────────────────────────────────────────────────────
@@ -74,14 +79,40 @@ pub struct PgProvider {
 /// Configuration for the PostgreSQL data provider.
 pub struct PostgresConfig {
     pub db_url: String,
+    pub max_connections: u32,
+    pub connect_timeout_seconds: u64,
+    pub idle_timeout_seconds: u64,
 }
 
 impl PgProvider {
-    pub async fn new(config: &PostgresConfig, driver: Arc<Driver>) -> Self {
-        let pool = sqlx::PgPool::connect(&config.db_url)
+    pub async fn new(config: &PostgresConfig, driver: Arc<Driver>) -> Result<Self> {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(config.max_connections)
+            .acquire_timeout(Duration::from_secs(config.connect_timeout_seconds))
+            .idle_timeout(Duration::from_secs(config.idle_timeout_seconds))
+            .connect(&config.db_url)
             .await
-            .expect("postgres connect failed");
-        PgProvider { pool, driver }
+            .map_err(map_sqlx_err)?;
+        sqlx::query("CREATE TABLE IF NOT EXISTS upload_sessions (id TEXT PRIMARY KEY, data BYTEA NOT NULL, owner TEXT NOT NULL DEFAULT '', state TEXT NOT NULL DEFAULT 'open', size BIGINT NOT NULL DEFAULT 0, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
+            .execute(&pool).await.map_err(map_sqlx_err)?;
+        for statement in [
+            "ALTER TABLE upload_sessions ADD COLUMN IF NOT EXISTS owner TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE upload_sessions ADD COLUMN IF NOT EXISTS state TEXT NOT NULL DEFAULT 'open'",
+            "ALTER TABLE upload_sessions ADD COLUMN IF NOT EXISTS size BIGINT NOT NULL DEFAULT 0",
+        ] {
+            sqlx::query(statement)
+                .execute(&pool)
+                .await
+                .map_err(map_sqlx_err)?;
+        }
+        if let Err(error) =
+            sqlx::query("CREATE INDEX IF NOT EXISTS node_expiry_file_idx ON node (ex, file)")
+                .execute(&pool)
+                .await
+        {
+            warn!(%error, "unable to create node expiry index; continuing without it");
+        }
+        Ok(PgProvider { pool, driver })
     }
 }
 
@@ -161,9 +192,68 @@ impl DataProvider for PgProvider {
         row_to_file(&row)
     }
 
-    async fn update(&self, id: &str, _parent: Option<&str>, file: &File) -> Result<File> {
+    async fn update(&self, id: &str, parent: Option<&str>, file: &File) -> Result<File> {
         let uuid = parse_uuid(id)?;
+        let expected_parent = parent.map(parse_uuid).transpose()?;
         let new_parent = file.parent.as_deref().map(parse_uuid).transpose()?;
+        let mut tx = self.pool.begin().await.map_err(map_sqlx_err)?;
+
+        let source = sqlx::query("SELECT parent, dir FROM fs WHERE id = $1 FOR UPDATE")
+            .bind(uuid)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(map_sqlx_err)?;
+        let current_parent: Option<uuid::Uuid> = source.try_get("parent").map_err(map_sqlx_err)?;
+        let source_dir: bool = source.try_get("dir").map_err(map_sqlx_err)?;
+        if expected_parent.is_some() && current_parent != expected_parent {
+            return Err(DataProviderError::InvalidParent);
+        }
+
+        let destination_id = new_parent.ok_or(DataProviderError::InvalidParent)?;
+        if destination_id == uuid {
+            return Err(DataProviderError::InvalidParent);
+        }
+        let destination = sqlx::query("SELECT dir FROM fs WHERE id = $1 FOR UPDATE")
+            .bind(destination_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(map_sqlx_err)?
+            .ok_or(DataProviderError::InvalidParent)?;
+        if !destination
+            .try_get::<bool, _>("dir")
+            .map_err(map_sqlx_err)?
+        {
+            return Err(DataProviderError::InvalidParent);
+        }
+
+        if source_dir {
+            let mut seen = HashSet::new();
+            let mut ancestor = Some(destination_id);
+            while let Some(current) = ancestor {
+                if !seen.insert(current) || current == uuid {
+                    return Err(DataProviderError::InvalidParent);
+                }
+                let row = sqlx::query("SELECT parent FROM fs WHERE id = $1 FOR UPDATE")
+                    .bind(current)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .map_err(map_sqlx_err)?;
+                ancestor = row.try_get("parent").map_err(map_sqlx_err)?;
+            }
+        }
+
+        let collision: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM fs WHERE parent = $1 AND name = $2 AND id <> $3)",
+        )
+        .bind(destination_id)
+        .bind(&file.name)
+        .bind(uuid)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(map_sqlx_err)?;
+        if collision {
+            return Err(DataProviderError::AlreadyExists);
+        }
 
         let row = sqlx::query(
             "UPDATE fs SET name = $1, parent = $2, mtime = NOW()
@@ -173,11 +263,21 @@ impl DataProvider for PgProvider {
         .bind(&file.name)
         .bind(new_parent)
         .bind(uuid)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await
-        .map_err(map_sqlx_err)?;
+        .map_err(|e| match e {
+            sqlx::Error::Database(ref dbe) if dbe.code().as_deref() == Some("23505") => {
+                DataProviderError::AlreadyExists
+            }
+            sqlx::Error::Database(ref dbe) if dbe.code().as_deref() == Some("23503") => {
+                DataProviderError::InvalidParent
+            }
+            e => map_sqlx_err(e),
+        })?;
 
-        row_to_file(&row)
+        let updated = row_to_file(&row)?;
+        tx.commit().await.map_err(map_sqlx_err)?;
+        Ok(updated)
     }
 
     async fn delete(&self, id: &str, parent: Option<&str>) -> Result<()> {
@@ -375,6 +475,92 @@ impl DataProvider for PgProvider {
         Ok(())
     }
 
+    async fn due_node_groups(
+        &self,
+        expires_before: i64,
+        limit: usize,
+    ) -> Result<Vec<DueNodeGroup>> {
+        let rows = sqlx::query(
+            r#"SELECT file, MIN(ex) AS min_expiry
+               FROM node
+               WHERE ex > 0 AND ex <= $1
+               GROUP BY file
+               ORDER BY min_expiry
+               LIMIT $2"#,
+        )
+        .bind(expires_before)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx_err)?;
+        rows.iter()
+            .map(|row| {
+                Ok(DueNodeGroup {
+                    file_id: row
+                        .try_get::<uuid::Uuid, _>("file")
+                        .map_err(map_sqlx_err)?
+                        .to_string(),
+                    min_expiry: row.try_get("min_expiry").map_err(map_sqlx_err)?,
+                })
+            })
+            .collect()
+    }
+
+    async fn renew_node_group(&self, id: &str, expires_before: i64) -> Result<bool> {
+        let file = parse_uuid(id)?;
+        let mut transaction = self.pool.begin().await.map_err(map_sqlx_err)?;
+        // Transaction-scoped advisory locks are automatically released on every
+        // exit path and prevent multiple replicas from renewing the same file.
+        let locked: bool =
+            sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))")
+                .bind(id)
+                .fetch_one(&mut *transaction)
+                .await
+                .map_err(map_sqlx_err)?;
+        if !locked {
+            return Ok(false);
+        }
+        let rows = sqlx::query(
+            r#"SELECT id, url, size, "start", "end", mid, ex, "is", hm
+               FROM node WHERE file = $1 ORDER BY id"#,
+        )
+        .bind(file)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(map_sqlx_err)?;
+        let mut nodes = rows.iter().map(row_to_node).collect::<Result<Vec<_>>>()?;
+        if nodes
+            .iter()
+            .filter_map(|node| (node.ex > 0).then_some(node.ex))
+            .min()
+            .is_none_or(|expiry| expiry > expires_before)
+        {
+            return Ok(false);
+        }
+        self.driver
+            .update_nodes(&mut nodes)
+            .await
+            .map_err(|error| DataProviderError::Other(error.to_string()))?;
+        let mut query: QueryBuilder<Postgres> = QueryBuilder::new(
+            r#"UPDATE node AS n SET url = v.url, ex = v.ex, "is" = v.is, hm = v.hm FROM ("#,
+        );
+        query.push_values(nodes.iter(), |mut row, node| {
+            row.push_bind(node.nid)
+                .push_bind(&node.url)
+                .push_bind(node.ex)
+                .push_bind(node.is)
+                .push_bind(&node.hm);
+        });
+        query.push(r#") AS v(id, url, ex, "is", hm) WHERE n.id = v.id"#);
+        query
+            .build()
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_sqlx_err)?;
+        transaction.commit().await.map_err(map_sqlx_err)?;
+        Ok(true)
+    }
+
     // ── path-based ops ────────────────────────────────────────────────────────
 
     async fn stat(&self, path: &str) -> Result<File> {
@@ -464,5 +650,80 @@ impl DataProvider for PgProvider {
     async fn close(&self) -> Result<()> {
         self.pool.close().await;
         Ok(())
+    }
+
+    async fn put_upload_session(&self, session: &UploadSession) -> Result<()> {
+        let data = bincode::serialize(session)?;
+        let state = match session.state {
+            crate::dataprovider::types::UploadState::Open => "open",
+            crate::dataprovider::types::UploadState::Committed => "committed",
+            crate::dataprovider::types::UploadState::Cancelled => "cancelled",
+        };
+        sqlx::query("INSERT INTO upload_sessions(id,data,owner,state,size,updated_at) VALUES($1,$2,$3,$4,$5,NOW()) ON CONFLICT(id) DO UPDATE SET data=EXCLUDED.data,owner=EXCLUDED.owner,state=EXCLUDED.state,size=EXCLUDED.size,updated_at=NOW()")
+            .bind(&session.id)
+            .bind(data)
+            .bind(&session.owner)
+            .bind(state)
+            .bind(session.size as i64)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx_err)?;
+        Ok(())
+    }
+    async fn get_upload_session(&self, id: &str) -> Result<UploadSession> {
+        let data: Vec<u8> = sqlx::query_scalar("SELECT data FROM upload_sessions WHERE id=$1")
+            .bind(id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(map_sqlx_err)?;
+        Ok(bincode::deserialize(&data)?)
+    }
+    async fn delete_upload_session(&self, id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM upload_sessions WHERE id=$1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx_err)?;
+        Ok(())
+    }
+    async fn storage_usage(&self) -> Result<u64> {
+        let total: i64 =
+            sqlx::query_scalar("SELECT COALESCE(SUM(size),0)::BIGINT FROM fs WHERE NOT dir")
+                .fetch_one(&self.pool)
+                .await
+                .map_err(map_sqlx_err)?;
+        Ok(total.max(0) as u64)
+    }
+
+    async fn upload_quota_usage(&self, owner: &str) -> Result<u64> {
+        let committed: i64 =
+            sqlx::query_scalar("SELECT COALESCE(SUM(size),0)::BIGINT FROM fs WHERE NOT dir")
+                .fetch_one(&self.pool)
+                .await
+                .map_err(map_sqlx_err)?;
+        let reserved: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(size),0)::BIGINT FROM upload_sessions WHERE owner=$1 AND state='open'",
+        )
+        .bind(owner)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(map_sqlx_err)?;
+        Ok(committed.max(0) as u64 + reserved.max(0) as u64)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_uuid;
+
+    #[test]
+    fn parse_uuid_accepts_uuid_ids() {
+        let id = "550e8400-e29b-41d4-a716-446655440000";
+        assert_eq!(parse_uuid(id).expect("uuid should parse").to_string(), id);
+    }
+
+    #[test]
+    fn parse_uuid_rejects_path_ids() {
+        assert!(parse_uuid("/folder/file").is_err());
     }
 }

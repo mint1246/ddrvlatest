@@ -3,16 +3,22 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 use base64::Engine as _;
 use chrono::{DateTime, Utc};
-use redb::{Database, ReadableTable, TableDefinition};
+use redb::{Database, ReadableTable, Table, TableDefinition};
 use serde::{Deserialize, Serialize};
 
-use crate::dataprovider::{DataProvider, DataProviderError, File, Result};
+use crate::dataprovider::types::UploadSession;
+use crate::dataprovider::{DataProvider, DataProviderError, DueNodeGroup, File, Result};
 use crate::ddrv::{Driver, Node};
 
 // ── table definitions ────────────────────────────────────────────────────────
 
 const FS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("fs");
 const NODES_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("nodes");
+const UPLOADS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("upload_sessions");
+const USAGE_TABLE: TableDefinition<&str, u64> = TableDefinition::new("storage_usage");
+const USAGE_KEY: &str = "total";
+const EXPIRY_TABLE: TableDefinition<&str, &str> = TableDefinition::new("node_expiry");
+const EXPIRY_PATH_TABLE: TableDefinition<&str, &str> = TableDefinition::new("node_expiry_path");
 const ROOT: &str = "/";
 
 // ── serialisation types ──────────────────────────────────────────────────────
@@ -38,6 +44,36 @@ struct StoredNode {
     ex: i64,
     is: i64,
     hm: String,
+}
+
+impl From<&Node> for StoredNode {
+    fn from(node: &Node) -> Self {
+        Self {
+            nid: node.nid,
+            url: node.url.clone(),
+            size: node.size,
+            start: node.start,
+            end: node.end,
+            mid: node.mid,
+            ex: node.ex,
+            is: node.is,
+            hm: node.hm.clone(),
+        }
+    }
+}
+
+fn stored_node_to_node(sn: StoredNode) -> Node {
+    Node {
+        nid: sn.nid,
+        url: sn.url,
+        size: sn.size,
+        start: sn.start,
+        end: sn.end,
+        mid: sn.mid,
+        ex: sn.ex,
+        is: sn.is,
+        hm: sn.hm,
+    }
 }
 
 // ── path helpers ─────────────────────────────────────────────────────────────
@@ -138,6 +174,50 @@ fn node_range_end(path: &str) -> String {
     format!("{}\x01", path)
 }
 
+fn adjust_storage_usage(table: &mut Table<'_, &str, u64>, delta: i64) -> Result<()> {
+    let current = table
+        .get(USAGE_KEY)?
+        .map(|value| value.value())
+        .unwrap_or(0);
+    let updated = if delta >= 0 {
+        current.saturating_add(delta as u64)
+    } else {
+        current.saturating_sub(delta.saturating_abs() as u64)
+    };
+    table.insert(USAGE_KEY, updated)?;
+    Ok(())
+}
+
+fn expiry_key(expiry: i64, path: &str) -> String {
+    format!("{:020}\x00{}", expiry, path)
+}
+
+fn minimum_expiry(nodes: &[Node]) -> Option<i64> {
+    nodes
+        .iter()
+        .filter_map(|n| (n.ex > 0).then_some(n.ex))
+        .min()
+}
+
+fn replace_expiry_index(
+    expiry_table: &mut Table<'_, &str, &str>,
+    path_table: &mut Table<'_, &str, &str>,
+    path: &str,
+    nodes: &[Node],
+) -> Result<()> {
+    let previous_key = path_table.get(path)?.map(|key| key.value().to_owned());
+    if let Some(previous_key) = previous_key {
+        expiry_table.remove(previous_key.as_str())?;
+        path_table.remove(path)?;
+    }
+    if let Some(expiry) = minimum_expiry(nodes) {
+        let key = expiry_key(expiry, path);
+        expiry_table.insert(key.as_str(), path)?;
+        path_table.insert(path, key.as_str())?;
+    }
+    Ok(())
+}
+
 // ── provider ─────────────────────────────────────────────────────────────────
 
 pub struct BoltDbProvider {
@@ -152,17 +232,80 @@ impl BoltDbProvider {
         // Initialise tables and ensure the root directory exists.
         let write_txn = db.begin_write()?;
         {
-            write_txn.open_table(NODES_TABLE)?;
-            let mut fs_table = write_txn.open_table(FS_TABLE)?;
-            if fs_table.get(ROOT)?.is_none() {
-                let root = StoredFile {
-                    name: ROOT.to_string(),
-                    dir: true,
-                    size: 0,
-                    mtime: Utc::now(),
-                };
-                let data = bincode::serialize(&root)?;
-                fs_table.insert(ROOT, data.as_slice())?;
+            let nodes = write_txn.open_table(NODES_TABLE)?;
+            write_txn.open_table(UPLOADS_TABLE)?;
+            let mut expiry = write_txn.open_table(EXPIRY_TABLE)?;
+            let mut expiry_paths = write_txn.open_table(EXPIRY_PATH_TABLE)?;
+            // Rebuild on open so databases created by older releases acquire a
+            // correct index without a separate migration step.
+            let old_keys = expiry
+                .iter()?
+                .map(|row| row.map(|(key, _)| key.value().to_owned()))
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            for key in old_keys {
+                expiry.remove(key.as_str())?;
+            }
+            let old_paths = expiry_paths
+                .iter()?
+                .map(|row| row.map(|(path, _)| path.value().to_owned()))
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            for path in old_paths {
+                expiry_paths.remove(path.as_str())?;
+            }
+            let mut current_path = None::<String>;
+            let mut current_nodes = Vec::new();
+            for row in nodes.iter()? {
+                let (key, value) = row?;
+                let path = key.value().split_once('\0').map(|(p, _)| p).unwrap_or("");
+                if current_path.as_deref() != Some(path) {
+                    if let Some(previous) = current_path.take() {
+                        replace_expiry_index(
+                            &mut expiry,
+                            &mut expiry_paths,
+                            &previous,
+                            &current_nodes,
+                        )?;
+                        current_nodes.clear();
+                    }
+                    current_path = Some(path.to_owned());
+                }
+                let stored: StoredNode = bincode::deserialize(value.value())?;
+                current_nodes.push(stored_node_to_node(stored));
+            }
+            if let Some(previous) = current_path {
+                replace_expiry_index(&mut expiry, &mut expiry_paths, &previous, &current_nodes)?;
+            }
+            let initial_usage = {
+                let mut fs_table = write_txn.open_table(FS_TABLE)?;
+                if fs_table.get(ROOT)?.is_none() {
+                    let root = StoredFile {
+                        name: ROOT.to_string(),
+                        dir: true,
+                        size: 0,
+                        mtime: Utc::now(),
+                    };
+                    let data = bincode::serialize(&root)?;
+                    fs_table.insert(ROOT, data.as_slice())?;
+                }
+
+                let usage_table = write_txn.open_table(USAGE_TABLE)?;
+                if usage_table.get(USAGE_KEY)?.is_none() {
+                    let mut total = 0u64;
+                    for item in fs_table.iter()? {
+                        let (_, value) = item?;
+                        let file: StoredFile = bincode::deserialize(value.value())?;
+                        if !file.dir {
+                            total = total.saturating_add(file.size.max(0) as u64);
+                        }
+                    }
+                    Some(total)
+                } else {
+                    None
+                }
+            };
+            if let Some(total) = initial_usage {
+                let mut usage_table = write_txn.open_table(USAGE_TABLE)?;
+                usage_table.insert(USAGE_KEY, total)?;
             }
         }
         write_txn.commit()?;
@@ -267,20 +410,104 @@ impl DataProvider for BoltDbProvider {
         .map_err(|e| DataProviderError::Other(e.to_string()))?
     }
 
-    async fn update(&self, id: &str, _parent: Option<&str>, file: &File) -> Result<File> {
+    async fn update(&self, id: &str, parent: Option<&str>, file: &File) -> Result<File> {
         let old_path = decode_path(id)?;
-        // Derive new path from new parent + new name
-        let new_path = if let Some(ref pid) = file.parent {
-            let pp = decode_path(pid)?;
-            clean_path(&format!("{}/{}", pp, file.name))
-        } else {
-            clean_path(&format!("{}/{}", parent_of(&old_path), file.name))
-        };
+        let expected_parent = parent.map(decode_path).transpose()?;
+        let destination_parent = file
+            .parent
+            .as_deref()
+            .map(decode_path)
+            .transpose()?
+            .unwrap_or_else(|| parent_of(&old_path).to_owned());
+        let new_path = clean_path(&format!("{}/{}", destination_parent, file.name));
+        let db = Arc::clone(&self.db);
 
-        if old_path != new_path {
-            self.mv(&old_path, &new_path).await?;
-        }
-        self.stat(&new_path).await
+        tokio::task::spawn_blocking(move || -> Result<File> {
+            let db = db.write().unwrap();
+            let write_txn = db.begin_write()?;
+            let result = {
+                let mut fs_table = write_txn.open_table(FS_TABLE)?;
+                let mut nodes_table = write_txn.open_table(NODES_TABLE)?;
+
+                let source = get_stored_file(&fs_table, &old_path)?;
+                if expected_parent
+                    .as_deref()
+                    .is_some_and(|p| p != parent_of(&old_path))
+                {
+                    return Err(DataProviderError::InvalidParent);
+                }
+                let destination =
+                    get_stored_file(&fs_table, &destination_parent).map_err(|e| match e {
+                        DataProviderError::NotFound => DataProviderError::InvalidParent,
+                        other => other,
+                    })?;
+                if !destination.dir
+                    || (source.dir
+                        && (destination_parent == old_path
+                            || destination_parent.starts_with(&format!("{old_path}/"))))
+                {
+                    return Err(DataProviderError::InvalidParent);
+                }
+
+                if old_path != new_path && fs_table.get(new_path.as_str())?.is_some() {
+                    return Err(DataProviderError::AlreadyExists);
+                }
+
+                let mut paths = vec![old_path.clone()];
+                paths.extend(collect_descendants(&fs_table, &old_path)?);
+                paths.sort();
+                paths.dedup();
+                let mut fs_moves = Vec::with_capacity(paths.len());
+                let mut node_moves = Vec::new();
+                for old in paths {
+                    let suffix = &old[old_path.len()..];
+                    let new = format!("{new_path}{suffix}");
+                    let raw = fs_table
+                        .get(old.as_str())?
+                        .ok_or(DataProviderError::NotFound)?
+                        .value()
+                        .to_vec();
+                    if old != new && fs_table.get(new.as_str())?.is_some() {
+                        return Err(DataProviderError::AlreadyExists);
+                    }
+                    for entry in nodes_table
+                        .range(node_range_start(&old).as_str()..node_range_end(&old).as_str())?
+                    {
+                        let (key, value) = entry?;
+                        let old_key = key.value().to_owned();
+                        node_moves.push((
+                            old_key.clone(),
+                            format!("{}{}", new, &old_key[old.len()..]),
+                            value.value().to_vec(),
+                        ));
+                    }
+                    fs_moves.push((old, new, raw));
+                }
+
+                for (old, _, _) in &fs_moves {
+                    fs_table.remove(old.as_str())?;
+                }
+                for (old, _, _) in &node_moves {
+                    nodes_table.remove(old.as_str())?;
+                }
+                for (_, new, raw) in &fs_moves {
+                    let mut stored: StoredFile = bincode::deserialize(raw)?;
+                    stored.name = new.rsplit('/').next().unwrap_or(new).to_owned();
+                    let raw = bincode::serialize(&stored)?;
+                    fs_table.insert(new.as_str(), raw.as_slice())?;
+                }
+                for (_, new, raw) in &node_moves {
+                    nodes_table.insert(new.as_str(), raw.as_slice())?;
+                }
+
+                let updated = get_stored_file(&fs_table, &new_path)?;
+                stored_to_file(&new_path, &updated)
+            };
+            write_txn.commit()?;
+            Ok(result)
+        })
+        .await
+        .map_err(|e| DataProviderError::Other(e.to_string()))?
     }
 
     async fn delete(&self, id: &str, parent: Option<&str>) -> Result<()> {
@@ -344,6 +571,11 @@ impl DataProvider for BoltDbProvider {
                         let data = bincode::serialize(&sn)?;
                         table.insert(key.as_str(), data.as_slice())?;
                     }
+                }
+                {
+                    let mut expiry = write_txn.open_table(EXPIRY_TABLE)?;
+                    let mut expiry_paths = write_txn.open_table(EXPIRY_PATH_TABLE)?;
+                    replace_expiry_index(&mut expiry, &mut expiry_paths, &path2, &updated)?;
                 }
                 write_txn.commit()?;
                 Ok(())
@@ -424,6 +656,11 @@ impl DataProvider for BoltDbProvider {
                         table.insert(key.as_str(), data.as_slice())?;
                     }
                 }
+                {
+                    let mut expiry = write_txn.open_table(EXPIRY_TABLE)?;
+                    let mut expiry_paths = write_txn.open_table(EXPIRY_PATH_TABLE)?;
+                    replace_expiry_index(&mut expiry, &mut expiry_paths, &path2, &updated)?;
+                }
                 write_txn.commit()?;
                 Ok(())
             })
@@ -455,6 +692,7 @@ impl DataProvider for BoltDbProvider {
             };
 
             let write_txn = db.begin_write()?;
+            let mut usage_delta = 0i64;
             {
                 let mut fs_table = write_txn.open_table(FS_TABLE)?;
                 let mut nodes_table = write_txn.open_table(NODES_TABLE)?;
@@ -490,10 +728,24 @@ impl DataProvider for BoltDbProvider {
                 let existing = fs_table.get(path.as_str())?.map(|g| g.value().to_vec());
                 if let Some(raw) = existing {
                     let mut sf: StoredFile = bincode::deserialize(&raw)?;
+                    let old_size = sf.size;
+                    if !sf.dir {
+                        usage_delta = new_size.saturating_sub(old_size);
+                    }
                     sf.size = new_size;
                     let data = bincode::serialize(&sf)?;
                     fs_table.insert(path.as_str(), data.as_slice())?;
                 }
+            }
+            if usage_delta != 0 {
+                let mut usage_table = write_txn.open_table(USAGE_TABLE)?;
+                adjust_storage_usage(&mut usage_table, usage_delta)?;
+            }
+            let indexed_nodes = collect_nodes(&write_txn.open_table(NODES_TABLE)?, &path)?;
+            {
+                let mut expiry = write_txn.open_table(EXPIRY_TABLE)?;
+                let mut expiry_paths = write_txn.open_table(EXPIRY_PATH_TABLE)?;
+                replace_expiry_index(&mut expiry, &mut expiry_paths, &path, &indexed_nodes)?;
             }
             write_txn.commit()?;
             Ok(())
@@ -509,6 +761,7 @@ impl DataProvider for BoltDbProvider {
         tokio::task::spawn_blocking(move || -> Result<()> {
             let db = db.write().unwrap();
             let write_txn = db.begin_write()?;
+            let mut usage_delta = 0i64;
             {
                 let mut nodes_table = write_txn.open_table(NODES_TABLE)?;
                 let mut fs_table = write_txn.open_table(FS_TABLE)?;
@@ -529,16 +782,102 @@ impl DataProvider for BoltDbProvider {
                 let existing = fs_table.get(path.as_str())?.map(|g| g.value().to_vec());
                 if let Some(raw) = existing {
                     let mut sf: StoredFile = bincode::deserialize(&raw)?;
+                    if !sf.dir {
+                        usage_delta = sf.size.saturating_neg();
+                    }
                     sf.size = 0;
                     let data = bincode::serialize(&sf)?;
                     fs_table.insert(path.as_str(), data.as_slice())?;
                 }
+            }
+            if usage_delta != 0 {
+                let mut usage_table = write_txn.open_table(USAGE_TABLE)?;
+                adjust_storage_usage(&mut usage_table, usage_delta)?;
+            }
+            {
+                let mut expiry = write_txn.open_table(EXPIRY_TABLE)?;
+                let mut expiry_paths = write_txn.open_table(EXPIRY_PATH_TABLE)?;
+                replace_expiry_index(&mut expiry, &mut expiry_paths, &path, &[])?;
             }
             write_txn.commit()?;
             Ok(())
         })
         .await
         .map_err(|e| DataProviderError::Other(e.to_string()))?
+    }
+
+    async fn due_node_groups(
+        &self,
+        expires_before: i64,
+        limit: usize,
+    ) -> Result<Vec<DueNodeGroup>> {
+        let db = Arc::clone(&self.db);
+        tokio::task::spawn_blocking(move || -> Result<Vec<DueNodeGroup>> {
+            let db = db.read().unwrap();
+            let transaction = db.begin_read()?;
+            let table = transaction.open_table(EXPIRY_TABLE)?;
+            let upper = format!("{:020}\x01", expires_before.max(0));
+            table
+                .range::<&str>(..upper.as_str())?
+                .take(limit)
+                .map(|row| {
+                    let (key, path) = row?;
+                    let min_expiry = key
+                        .value()
+                        .split_once('\0')
+                        .and_then(|(value, _)| value.parse().ok())
+                        .unwrap_or(0);
+                    Ok(DueNodeGroup {
+                        file_id: encode_path(path.value()),
+                        min_expiry,
+                    })
+                })
+                .collect()
+        })
+        .await
+        .map_err(|error| DataProviderError::Other(error.to_string()))?
+    }
+
+    async fn renew_node_group(&self, id: &str, expires_before: i64) -> Result<bool> {
+        let path = decode_path(id)?;
+        let db = Arc::clone(&self.db);
+        let read_path = path.clone();
+        let mut nodes = tokio::task::spawn_blocking(move || -> Result<Vec<Node>> {
+            let db = db.read().unwrap();
+            let transaction = db.begin_read()?;
+            collect_nodes(&transaction.open_table(NODES_TABLE)?, &read_path)
+        })
+        .await
+        .map_err(|error| DataProviderError::Other(error.to_string()))??;
+        if minimum_expiry(&nodes).is_none_or(|expiry| expiry > expires_before) {
+            return Ok(false);
+        }
+        self.driver
+            .update_nodes(&mut nodes)
+            .await
+            .map_err(|error| DataProviderError::Other(error.to_string()))?;
+        let db = Arc::clone(&self.db);
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let db = db.write().unwrap();
+            let transaction = db.begin_write()?;
+            {
+                let mut table = transaction.open_table(NODES_TABLE)?;
+                for node in &nodes {
+                    let bytes = bincode::serialize(&StoredNode::from(node))?;
+                    table.insert(node_key(&path, node.nid).as_str(), bytes.as_slice())?;
+                }
+            }
+            {
+                let mut expiry = transaction.open_table(EXPIRY_TABLE)?;
+                let mut expiry_paths = transaction.open_table(EXPIRY_PATH_TABLE)?;
+                replace_expiry_index(&mut expiry, &mut expiry_paths, &path, &nodes)?;
+            }
+            transaction.commit()?;
+            Ok(())
+        })
+        .await
+        .map_err(|error| DataProviderError::Other(error.to_string()))??;
+        Ok(true)
     }
 
     // ── path-based ops ────────────────────────────────────────────────────────
@@ -701,14 +1040,33 @@ impl DataProvider for BoltDbProvider {
             };
 
             let write_txn = db.begin_write()?;
+            let mut removed_size = 0u64;
             {
                 let mut fs_table = write_txn.open_table(FS_TABLE)?;
                 let mut nodes_table = write_txn.open_table(NODES_TABLE)?;
                 for p in &fs_paths {
+                    if let Some(value) = fs_table.get(p.as_str())? {
+                        let file: StoredFile = bincode::deserialize(value.value())?;
+                        if !file.dir {
+                            removed_size = removed_size.saturating_add(file.size.max(0) as u64);
+                        }
+                    }
                     fs_table.remove(p.as_str())?;
                 }
                 for k in &node_keys {
                     nodes_table.remove(k.as_str())?;
+                }
+            }
+            if removed_size > 0 {
+                let delta = -(removed_size.min(i64::MAX as u64) as i64);
+                let mut usage_table = write_txn.open_table(USAGE_TABLE)?;
+                adjust_storage_usage(&mut usage_table, delta)?;
+            }
+            {
+                let mut expiry = write_txn.open_table(EXPIRY_TABLE)?;
+                let mut expiry_paths = write_txn.open_table(EXPIRY_PATH_TABLE)?;
+                for path in &fs_paths {
+                    replace_expiry_index(&mut expiry, &mut expiry_paths, path, &[])?;
                 }
             }
             write_txn.commit()?;
@@ -797,6 +1155,15 @@ impl DataProvider for BoltDbProvider {
                     nodes_table.remove(old_k.as_str())?;
                 }
             }
+            {
+                let mut expiry = write_txn.open_table(EXPIRY_TABLE)?;
+                let mut expiry_paths = write_txn.open_table(EXPIRY_PATH_TABLE)?;
+                for (old_path, new_path, _) in &fs_moves {
+                    replace_expiry_index(&mut expiry, &mut expiry_paths, old_path, &[])?;
+                    let nodes = collect_nodes(&write_txn.open_table(NODES_TABLE)?, new_path)?;
+                    replace_expiry_index(&mut expiry, &mut expiry_paths, new_path, &nodes)?;
+                }
+            }
             write_txn.commit()?;
             Ok(())
         })
@@ -832,6 +1199,187 @@ impl DataProvider for BoltDbProvider {
     async fn close(&self) -> Result<()> {
         // redb flushes on every commit; nothing extra needed here.
         Ok(())
+    }
+
+    async fn put_upload_session(&self, session: &UploadSession) -> Result<()> {
+        let db = Arc::clone(&self.db);
+        let session = session.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let db = db.write().unwrap();
+            let tx = db.begin_write()?;
+            {
+                let mut table = tx.open_table(UPLOADS_TABLE)?;
+                let bytes = bincode::serialize(&session)?;
+                table.insert(session.id.as_str(), bytes.as_slice())?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| DataProviderError::Other(e.to_string()))?
+    }
+
+    async fn get_upload_session(&self, id: &str) -> Result<UploadSession> {
+        let db = Arc::clone(&self.db);
+        let id = id.to_owned();
+        tokio::task::spawn_blocking(move || -> Result<UploadSession> {
+            let db = db.read().unwrap();
+            let tx = db.begin_read()?;
+            let table = tx.open_table(UPLOADS_TABLE)?;
+            let value = table.get(id.as_str())?.ok_or(DataProviderError::NotFound)?;
+            Ok(bincode::deserialize(value.value())?)
+        })
+        .await
+        .map_err(|e| DataProviderError::Other(e.to_string()))?
+    }
+
+    async fn delete_upload_session(&self, id: &str) -> Result<()> {
+        let db = Arc::clone(&self.db);
+        let id = id.to_owned();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let db = db.write().unwrap();
+            let tx = db.begin_write()?;
+            {
+                let mut table = tx.open_table(UPLOADS_TABLE)?;
+                table.remove(id.as_str())?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| DataProviderError::Other(e.to_string()))?
+    }
+
+    async fn storage_usage(&self) -> Result<u64> {
+        let db = Arc::clone(&self.db);
+        tokio::task::spawn_blocking(move || -> Result<u64> {
+            let db = db.read().unwrap();
+            let tx = db.begin_read()?;
+            let table = tx.open_table(USAGE_TABLE)?;
+            Ok(table
+                .get(USAGE_KEY)?
+                .map(|value| value.value())
+                .unwrap_or(0))
+        })
+        .await
+        .map_err(|e| DataProviderError::Other(e.to_string()))?
+    }
+
+    async fn upload_quota_usage(&self, owner: &str) -> Result<u64> {
+        let db = Arc::clone(&self.db);
+        let owner = owner.to_owned();
+        tokio::task::spawn_blocking(move || -> Result<u64> {
+            let db = db.read().unwrap();
+            let tx = db.begin_read()?;
+            let mut total = tx
+                .open_table(USAGE_TABLE)?
+                .get(USAGE_KEY)?
+                .map(|value| value.value())
+                .unwrap_or(0);
+            let uploads = tx.open_table(UPLOADS_TABLE)?;
+            for row in uploads.iter()? {
+                let (_, value) = row?;
+                let session: UploadSession = bincode::deserialize(value.value())?;
+                if session.owner == owner
+                    && matches!(session.state, crate::dataprovider::types::UploadState::Open)
+                {
+                    total = total.saturating_add(session.size);
+                }
+            }
+            Ok(total)
+        })
+        .await
+        .map_err(|e| DataProviderError::Other(e.to_string()))?
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod backend_contract_tests {
+    use super::*;
+    use crate::ddrv::{Config, TOKEN_BOT};
+
+    fn provider() -> (BoltDbProvider, std::path::PathBuf) {
+        let path = std::env::temp_dir().join(format!("ddrv-move-{}.redb", uuid::Uuid::new_v4()));
+        let driver = Arc::new(
+            Driver::new(Config {
+                tokens: vec!["test".into()],
+                token_type: TOKEN_BOT,
+                channels: vec!["test".into()],
+                chunk_size: 1024,
+                nitro: false,
+            })
+            .unwrap(),
+        );
+        (
+            BoltDbProvider::new(path.to_str().unwrap(), driver).unwrap(),
+            path,
+        )
+    }
+
+    #[tokio::test]
+    async fn update_move_contract() {
+        let (provider, path) = provider();
+        let source = provider.create("source", "root", true).await.unwrap();
+        let destination = provider.create("destination", "root", true).await.unwrap();
+        let item = provider.create("item", &source.id, false).await.unwrap();
+
+        let mut moved = item.clone();
+        moved.parent = Some(destination.id.clone());
+        let moved = provider
+            .update(&item.id, Some(&source.id), &moved)
+            .await
+            .unwrap();
+        assert_eq!(moved.parent.as_deref(), Some(destination.id.as_str()));
+
+        let missing_parent = base64::engine::general_purpose::STANDARD.encode("/missing");
+        let mut update = moved.clone();
+        update.parent = Some(missing_parent);
+        assert!(matches!(
+            provider
+                .update(&moved.id, Some(&destination.id), &update)
+                .await,
+            Err(DataProviderError::InvalidParent)
+        ));
+
+        provider
+            .create("collision", &source.id, false)
+            .await
+            .unwrap();
+        let collision = provider
+            .create("collision", &destination.id, false)
+            .await
+            .unwrap();
+        let mut update = collision.clone();
+        update.parent = Some(source.id.clone());
+        assert!(matches!(
+            provider
+                .update(&collision.id, Some(&destination.id), &update)
+                .await,
+            Err(DataProviderError::AlreadyExists)
+        ));
+
+        let mut update = moved.clone();
+        update.parent = Some(source.id.clone());
+        assert!(matches!(
+            provider.update(&moved.id, Some("root"), &update).await,
+            Err(DataProviderError::InvalidParent)
+        ));
+
+        let destination_file = provider
+            .create("not-a-directory", "root", false)
+            .await
+            .unwrap();
+        update.parent = Some(destination_file.id);
+        assert!(matches!(
+            provider
+                .update(&moved.id, Some(&destination.id), &update)
+                .await,
+            Err(DataProviderError::InvalidParent)
+        ));
+
+        provider.close().await.unwrap();
+        std::fs::remove_file(path).unwrap();
     }
 }
 

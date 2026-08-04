@@ -132,10 +132,7 @@ impl AsyncRead for Reader {
                     }
                     Poll::Ready(Err(e)) => {
                         this.fetch = None;
-                        return Poll::Ready(Err(io::Error::new(
-                            io::ErrorKind::Other,
-                            e.to_string(),
-                        )));
+                        return Poll::Ready(Err(io::Error::other(e.to_string())));
                     }
                 }
             }

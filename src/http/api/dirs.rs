@@ -5,7 +5,7 @@ use axum::{
     Json,
 };
 
-use super::types::{err, ApiResponse, CreateDirRequest, Directory, UpdateDirRequest};
+use super::types::{err, valid_name, ApiResponse, CreateDirRequest, Directory, UpdateDirRequest};
 use crate::{dataprovider, dataprovider::types::DataProviderError, http::AppState};
 
 fn dp_err(e: DataProviderError) -> Response {
@@ -16,14 +16,6 @@ fn dp_err(e: DataProviderError) -> Response {
         DataProviderError::InvalidParent => err(StatusCode::BAD_REQUEST, e.to_string()),
         e => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
-}
-
-fn validate_name(name: &str) -> bool {
-    let trimmed = name.trim();
-    !trimmed.is_empty()
-        && trimmed.len() <= 255
-        && !trimmed.contains(|c| matches!(c, '/' | '<' | '>' | '"' | '|' | '*' | '\\'))
-        && !trimmed.chars().any(|c| c.is_control())
 }
 
 /// GET /api/directories/:id   (or GET /api/directories with no id)
@@ -60,7 +52,7 @@ pub async fn create_dir_handler(
     State(_state): State<AppState>,
     Json(body): Json<CreateDirRequest>,
 ) -> Response {
-    if !validate_name(&body.name) {
+    if !valid_name(&body.name) {
         return err(StatusCode::BAD_REQUEST, "invalid directory name");
     }
     let parent = body.parent.as_deref().unwrap_or("root");
@@ -83,13 +75,19 @@ pub async fn update_dir_handler(
         Err(e) => return dp_err(e),
     };
     if let Some(name) = body.name {
-        if !validate_name(&name) {
+        if !valid_name(&name) {
             return err(StatusCode::BAD_REQUEST, "invalid directory name");
         }
         dir.name = name;
     }
-    let parent = body.parent.as_deref();
-    match dp.update(&id, parent, &dir).await {
+    let expected_parent = dir.parent.clone();
+    if let Some(parent) = body.parent {
+        if parent.trim().is_empty() || parent.chars().any(char::is_control) {
+            return err(StatusCode::BAD_REQUEST, "invalid parent");
+        }
+        dir.parent = Some(parent);
+    }
+    match dp.update(&id, expected_parent.as_deref(), &dir).await {
         Ok(f) => ApiResponse::ok(f).into_response(),
         Err(e) => dp_err(e),
     }

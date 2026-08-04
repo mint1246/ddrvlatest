@@ -24,6 +24,7 @@ pub struct Rest {
     tokens: Vec<String>,
     last_token_idx: AtomicUsize,
     last_ch_idx: AtomicUsize,
+    #[allow(dead_code)]
     pub chunk_size: usize,
 }
 
@@ -118,6 +119,7 @@ impl Rest {
     }
 
     /// Fetch up to 100 messages from a channel, optionally anchored at `message_id`.
+    #[allow(dead_code)]
     pub async fn get_messages(
         &self,
         channel_id: &str,

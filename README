@@ -14,6 +14,9 @@ HIGHLIGHTS
 - Metadata backends: redb (embedded) and PostgreSQL.
 - HTTP supports partial downloads (Range requests).
 - React and TypeScript HTTP workspace with a responsive Material 3 Expressive UI.
+- HTTPS must be terminated by a reverse proxy or load balancer; the built-in
+  frontend serves plain HTTP only. TLS configuration keys are rejected so that
+  a configuration cannot silently claim to enable HTTPS.
 
 REQUIREMENTS
 ------------
@@ -56,6 +59,11 @@ HTTP UI DEVELOPMENT
 CONFIGURATION FILE
 ------------------
 - See `config/config_example.yaml` for a full sample.
+- `frontend.http.addr` configures the plain HTTP listener. To expose HTTPS,
+  terminate TLS in a reverse proxy (for example, Caddy or nginx) and proxy to
+  that address. The unsupported `https_addr`, `https_keypath`, and
+  `https_crtpath` settings (and their former `HTTPS_ADDR`, `HTTPS_KEYPATH`, and
+  `HTTPS_CRTPATH` environment variables) are rejected during configuration loading.
 - ddrv automatically searches for:
   - `./config.yaml`
   - `$HOME/.config/ddrv/config.yaml`
