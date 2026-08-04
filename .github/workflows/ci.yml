@@ -111,17 +111,23 @@ jobs:
         run: cargo test --all-features migration::tests::migrates_zero_length_legacy_db_without_exporter
 
   javascript:
-    name: JavaScript syntax
+    name: Web checks
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Check Cloudflare worker
+      - name: Install web dependencies
+        run: npm ci --prefix web
+      - name: Check Cloudflare worker syntax
         run: node --check cloudflare-worker/index.js
-      - name: Check web application
-        run: node --check internal/http/web/static/app.js
+      - name: Typecheck web application
+        run: npm run typecheck --prefix web
+      - name: Test web application
+        run: npm run test --prefix web -- --run
+      - name: Build web application
+        run: npm run build --prefix web
 
   container-smoke:
     name: Container startup smoke test
